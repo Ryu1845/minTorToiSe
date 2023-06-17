@@ -3,9 +3,9 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import einsum, nn
+from torch.nn.functional import cross_entropy, gelu, normalize, softmax
 
 
 def masked_mean(t, mask):
@@ -33,7 +33,7 @@ class CLVPConfig:
 class GEGLU(nn.Module):
     def forward(self, x):
         x, gates = x.chunk(2, dim=-1)
-        return x * F.gelu(gates)
+        return x * gelu(gates)
 
 
 class SelfAttention(nn.Module):
@@ -70,7 +70,7 @@ class SelfAttention(nn.Module):
         if mask is not None:
             mask = rearrange(mask, "b j -> b () () j")
             att = att.masked_fill(mask, float("-inf"))
-        att = F.softmax(att, dim=-1)
+        att = softmax(att, dim=-1)
         att = self.attn_dropout(att)
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
@@ -171,8 +171,8 @@ class CLVP(nn.Module):
         text_latents = self.to_text_latent(text_latents)
         speech_latents = self.to_speech_latent(speech_latents)
 
-        text_latents = F.normalize(text_latents, p=2, dim=-1)
-        speech_latents = F.normalize(speech_latents, p=2, dim=-1)
+        text_latents = normalize(text_latents, p=2, dim=-1)
+        speech_latents = normalize(speech_latents, p=2, dim=-1)
 
         temp = self.temperature.exp()
 
@@ -182,7 +182,7 @@ class CLVP(nn.Module):
 
         sim = einsum("i d, j d -> i j", text_latents, speech_latents) * temp
         labels = torch.arange(batch_size, device=device)
-        loss = (F.cross_entropy(sim, labels) + F.cross_entropy(sim.t(), labels)) / 2
+        loss = (cross_entropy(sim, labels) + cross_entropy(sim.t(), labels)) / 2
         return loss
 
 

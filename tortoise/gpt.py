@@ -12,10 +12,11 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 
 # TODO adapt some stuff from nanoGPT
 import math
+from collections import OrderedDict
 
 import torch
 from torch import nn
-from torch.nn import functional as F
+from torch.nn.functional import cross_entropy, softmax
 
 
 class NewGELU(nn.Module):
@@ -67,7 +68,7 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
+        att = softmax(att, dim=-1)
         att = self.attn_dropout(att)
         y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
@@ -85,20 +86,20 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
-        self.mlp = nn.ModuleDict(
-            {
-                "c_fc": nn.Linear(config.n_embd, 4 * config.n_embd),
-                "c_proj": nn.Linear(4 * config.n_embd, config.n_embd),
-                "act": NewGELU(),
-                "dropout": nn.Dropout(config.resid_pdrop),
-            }
+        self.mlp = nn.Sequential(
+            OrderedDict(
+                {
+                    "c_fc": nn.Linear(config.n_embd, 4 * config.n_embd),
+                    "c_proj": nn.Linear(4 * config.n_embd, config.n_embd),
+                    "act": NewGELU(),
+                    "dropout": nn.Dropout(config.resid_pdrop),
+                }
+            )
         )
-        m = self.mlp
-        self.mlpf = lambda x: m.dropout(m.c_proj(m.act(m.c_fc(x))))  # MLP forward
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlpf(self.ln_2(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 
@@ -203,13 +204,13 @@ class GPT(nn.Module):
         # if we are given some desired targets also calculate the loss
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
         return logits, loss
 
     # TODO replace with temperature sampling
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None):
+    def generate(self, idx, max_new_tokens, *, do_sample: bool, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -227,7 +228,7 @@ class GPT(nn.Module):
                 v, _ = torch.topk(logits, top_k)
                 logits[logits < v[:, [-1]]] = -float("Inf")
             # apply softmax to convert logits to (normalized) probabilities
-            probs = F.softmax(logits, dim=-1)
+            probs = softmax(logits, dim=-1)
             # either sample from the distribution or take the most likely element
             if do_sample:
                 idx_next = torch.multinomial(probs, num_samples=1)

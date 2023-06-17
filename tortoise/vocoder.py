@@ -1,6 +1,6 @@
 import torch
-import torch.nn.functional as F
 from torch import nn
+from torch.nn.functional import pad
 
 MAX_WAV_VALUE = 32768.0
 
@@ -116,8 +116,8 @@ class LVCBlock(torch.nn.Module):
         in_channels,
         cond_channels,
         stride,
-        dilations=[1, 3, 9, 27],
-        lReLU_slope=0.2,
+        dilations=(1, 3, 9, 27),
+        lrelu_slope=0.2,
         conv_kernel_size=3,
         cond_hop_length=256,
         kpnet_hidden_channels=64,
@@ -139,11 +139,11 @@ class LVCBlock(torch.nn.Module):
             kpnet_hidden_channels=kpnet_hidden_channels,
             kpnet_conv_size=kpnet_conv_size,
             kpnet_dropout=kpnet_dropout,
-            kpnet_nonlinear_activation_params={"negative_slope": lReLU_slope},
+            kpnet_nonlinear_activation_params={"negative_slope": lrelu_slope},
         )
 
         self.convt_pre = nn.Sequential(
-            nn.LeakyReLU(lReLU_slope),
+            nn.LeakyReLU(lrelu_slope),
             nn.utils.weight_norm(
                 nn.ConvTranspose1d(
                     in_channels,
@@ -160,7 +160,7 @@ class LVCBlock(torch.nn.Module):
         for dilation in dilations:
             self.conv_blocks.append(
                 nn.Sequential(
-                    nn.LeakyReLU(lReLU_slope),
+                    nn.LeakyReLU(lrelu_slope),
                     nn.utils.weight_norm(
                         nn.Conv1d(
                             in_channels,
@@ -170,7 +170,7 @@ class LVCBlock(torch.nn.Module):
                             dilation=dilation,
                         )
                     ),
-                    nn.LeakyReLU(lReLU_slope),
+                    nn.LeakyReLU(lrelu_slope),
                 )
             )
 
@@ -220,11 +220,11 @@ class LVCBlock(torch.nn.Module):
         assert in_length == (kernel_length * hop_size), "length of (x, kernel) is not matched"
 
         padding = dilation * int((kernel_size - 1) / 2)
-        x = F.pad(x, (padding, padding), "constant", 0)  # (batch, in_channels, in_length + 2*padding)
+        x = pad(x, (padding, padding), "constant", 0)  # (batch, in_channels, in_length + 2*padding)
         x = x.unfold(2, hop_size + 2 * padding, hop_size)  # (batch, in_channels, kernel_length, hop_size + 2*padding)
 
         if hop_size < dilation:
-            x = F.pad(x, (0, dilation), "constant", 0)
+            x = pad(x, (0, dilation), "constant", 0)
         x = x.unfold(
             3, dilation, dilation
         )  # (batch, in_channels, kernel_length, (hop_size + 2*padding)/dilation, dilation)
@@ -258,9 +258,9 @@ class UnivNetGenerator(nn.Module):
         self,
         noise_dim=64,
         channel_size=32,
-        dilations=[1, 3, 9, 27],
-        strides=[8, 8, 4],
-        lReLU_slope=0.2,
+        dilations=(1, 3, 9, 27),
+        strides=(8, 8, 4),
+        lrelu_slope=0.2,
         kpnet_conv_size=3,
         # Below are MEL configurations options that this generator requires.
         hop_length=256,
@@ -283,7 +283,7 @@ class UnivNetGenerator(nn.Module):
                     n_mel_channels,
                     stride=stride,
                     dilations=dilations,
-                    lReLU_slope=lReLU_slope,
+                    lrelu_slope=lrelu_slope,
                     cond_hop_length=hop_length,
                     kpnet_conv_size=kpnet_conv_size,
                 )
@@ -292,7 +292,7 @@ class UnivNetGenerator(nn.Module):
         self.conv_pre = nn.utils.weight_norm(nn.Conv1d(noise_dim, channel_size, 7, padding=3, padding_mode="reflect"))
 
         self.conv_post = nn.Sequential(
-            nn.LeakyReLU(lReLU_slope),
+            nn.LeakyReLU(lrelu_slope),
             nn.utils.weight_norm(nn.Conv1d(channel_size, 1, 7, padding=3, padding_mode="reflect")),
             nn.Tanh(),
         )
