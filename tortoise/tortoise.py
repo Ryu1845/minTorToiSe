@@ -31,23 +31,34 @@ class TortoiseConfig:
         checkpointing:
     """
 
-    n_layer: int = 8
-    n_embd: int = 512
-    n_head: int = 8
-    max_text_tokens: int = 120
-    max_mel_tokens: int = 250
-    max_conditioning_inputs: int = 1
+    n_layer: int = 30
+    n_embd: int = 1024
+    n_head: int = 16
+    max_text_tokens: int = 402
+    max_mel_tokens: int = 604
+    max_conditioning_inputs: int = 2
     mel_length_compression: int = 1024
-    n_text_token: int = 256
-    start_text_token: int = 256
+    n_text_token: int = 255
+    start_text_token: int = 255
     stop_text_token: int = 0
     n_mel_token: int = 8194
     start_mel_token: int = 8192
     stop_mel_token: int = 8193
     train_solo_embeddings: bool = False
     use_mel_tokens_as_input: bool = True
-    checkpointing: bool = True
+    checkpointing: bool = False
     n_type: int = 1
+
+
+class LearnedPositionEmbedding(nn.Module):
+    def __init__(self, seq_len: int, n_embd: int, init: float = 0.2):
+        super().__init__()
+        self.emb = nn.Embedding(seq_len, n_embd)
+        self.emb.weight.data.normal_(mean=0.0, std=init)
+
+    def forward(self, x: Tensor):
+        seq_len = x.shape[1]
+        return self.emb(torch.arange(0, seq_len, device=x.device))
 
 
 class Tortoise(nn.Module):
@@ -60,8 +71,10 @@ class Tortoise(nn.Module):
 
         self.embed_text = nn.Embedding(config.n_text_token * config.n_type + 1, config.n_embd)
         self.embed_mel = nn.Embedding(config.n_mel_token * config.n_type + 1, config.n_embd)
-        self.embed_pos_text = LearnedPositionEmbeddings()
-        self.embed_pos_mel = LearnedPositionEmbeddings()
+        self.embed_pos_text = LearnedPositionEmbedding(config.max_text_tokens + 2, config.n_embd)
+        self.embed_pos_mel = LearnedPositionEmbedding(
+            config.max_mel_tokens + config.max_conditioning_inputs + 2, config.n_embd
+        )
 
         self.transformer = GPT(config)
 
