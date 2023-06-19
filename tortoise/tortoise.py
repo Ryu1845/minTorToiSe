@@ -4,7 +4,7 @@ import torch
 from torch import nn, Tensor
 from torch.nn.functional import pad, cross_entropy
 
-from .gpt import GPT
+from .gpt import GPT, GPTConfig
 
 
 @dataclass
@@ -76,7 +76,7 @@ class Tortoise(nn.Module):
             config.max_mel_tokens + config.max_conditioning_inputs + 2, config.n_embd
         )
 
-        self.transformer = GPT(config)
+        self.transformer = GPT(GPTConfig.from_tortoise_config(config))
 
         self.final_norm = nn.LayerNorm(config.n_embd)
 
@@ -102,7 +102,7 @@ class Tortoise(nn.Module):
         # TODO investigate raw mels
         mel_emb = self.embed_mel(mel_inputs) + self.embed_pos_mel(mel_inputs)
         emb = torch.cat([condition, text_emb, mel_emb], dim=1)
-        enc = self.final_norm(self.transformer(emb))
+        enc = self.final_norm(self.transformer(emb)[0])
         text_logits = self.text_head(enc[:, : text_emb.shape[1]]).permute(0, 2, 1)
         mel_logits = self.mel_head(enc[:, -mel_emb.shape[1] :]).permute(0, 2, 1)
         # TODO check return latent
@@ -110,3 +110,14 @@ class Tortoise(nn.Module):
         loss_text = cross_entropy(text_logits, text_targets.long())
         loss_mel = cross_entropy(mel_logits, mel_targets.long())
         return loss_text.mean(), loss_mel.mean(), mel_logits
+
+
+if __name__ == '__main__':
+    torch.set_default_device("cuda")
+    tortoise = Tortoise(TortoiseConfig()).eval()
+    l_text, l_mel, mel_log = tortoise(
+        text_inputs=torch.randint(high=120, size=(2, 250)),
+        mel_inputs=torch.randint(high=8192, size=(2, 250)),
+        speech_conditioning_latent=torch.randn(2, 1024),
+    )
+    print(l_text)
