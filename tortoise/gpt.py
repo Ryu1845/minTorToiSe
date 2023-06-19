@@ -31,6 +31,16 @@ class GPTConfig:
     resid_pdrop: float = 0.1
     embd_pdrop: float = 0.1
 
+    @classmethod
+    def from_tortoise_config(cls, config):
+        return cls(
+            config.n_embd,
+            config.n_head,
+            config.n_layer,
+            block_size=config.max_mel_tokens + config.max_conditioning_inputs + 2,
+            vocab_size=config.max_mel_tokens,
+        )
+
 
 class NewGELU(nn.Module):
     """
@@ -117,7 +127,7 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
-    """GPT Language Model"""
+    """GPT Language Model without input embedding"""
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -138,8 +148,6 @@ class GPT(nn.Module):
 
         self.transformer = nn.ModuleDict(
             {
-                "wte": nn.Embedding(config.vocab_size, config.n_embd),
-                "wpe": nn.Embedding(config.block_size, config.n_embd),
                 "drop": nn.Dropout(config.embd_pdrop),
                 "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 "ln_f": nn.LayerNorm(config.n_embd),
@@ -201,16 +209,12 @@ class GPT(nn.Module):
         return model
     """
 
-    def forward(self, idx, targets=None):
-        device = idx.device
-        b, t = idx.size()
+    def forward(self, tok_emb, targets=None):
+        b, t, d = tok_emb.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # shape (1, t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (1, t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
@@ -221,7 +225,7 @@ class GPT(nn.Module):
         if targets is not None:
             loss = cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
 
-        return logits, loss
+        return x, logits, loss
 
     # TODO replace with temperature sampling
     @torch.no_grad()
