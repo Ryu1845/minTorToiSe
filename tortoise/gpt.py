@@ -13,10 +13,23 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 # TODO adapt some stuff from nanoGPT
 import math
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 from torch.nn.functional import cross_entropy, softmax
+
+
+@dataclass
+class GPTConfig:
+    n_embd: int = 1024
+    n_head: int = 16
+    n_layer: int = 30
+    block_size: int = 1024
+    vocab_size: int = 256
+    attn_pdrop: float = 0.1
+    resid_pdrop: float = 0.1
+    embd_pdrop: float = 0.1
 
 
 class NewGELU(nn.Module):
@@ -145,12 +158,13 @@ class GPT(nn.Module):
         print(f"number of parameters: {n_params / 1e6:.2f}M")
 
     # TODO convert to tortoise's GPT2InferenceModel
+    """
     @classmethod
     def from_pretrained(cls, model_type):
-        """
+        '''
         Initialize a pretrained GPT model by copying over the weights
         from a huggingface/transformers checkpoint.
-        """
+        '''
         assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
         from transformers import GPT2LMHeadModel
 
@@ -185,6 +199,7 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
+    """
 
     def forward(self, idx, targets=None):
         device = idx.device
