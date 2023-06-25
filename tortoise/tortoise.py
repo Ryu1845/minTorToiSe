@@ -1,6 +1,12 @@
+"""
+The TorToiSe autoregressive model
+"""
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
+from einops import rearrange
+from jaxtyping import Float
 from torch import nn, Tensor
 from torch.nn.functional import pad, cross_entropy
 
@@ -61,6 +67,42 @@ class LearnedPositionEmbedding(nn.Module):
         return self.emb(torch.arange(0, seq_len, device=x.device))
 
 
+class AttentionBlock(nn.Module):
+    """
+    An attention block that allows spatial positions to attend to each other.
+
+    Originally ported from here, but adapted to the 1d case.
+    https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.norm = nn.GroupNorm(32, config.n_embd)
+        self.qkv = nn.Conv1d(config.n_embd, config.n_embd * 3, 1)
+        self.attention = nn.MultiheadAttention(config.n_embd, config.n_head)
+        self.proj_out = nn.Conv1d(config.n_embd, config.n_embd, kernel_size=1)
+
+    def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None):
+        qkv = self.qkv(self.norm(x))  # [n c l] -> [n c*3 l]
+        q, k, v = rearrange(qkv, "n c l -> n l c").chunk(3, dim=-1)  # [n c*3 l] -> 3 of [n l c]
+        h, _ = self.attention(q, k, v, attn_mask=mask)
+        h = rearrange(h, "n l c -> n c l")
+        h = self.proj_out(h)  # [n c l] -> [n c l]
+        return x + h
+
+
+class ConditioningEncoder(nn.Module):
+    def __init__(self, config, spec_dim: int = 80):
+        super().__init__()
+        self.init = nn.Conv1d(spec_dim, config.n_embd, kernel_size=1)
+        self.attn = nn.Sequential(*(AttentionBlock(config) for _ in range(6)))
+
+    def forward(self, speech: Float[Tensor, "batch spec_d length"]):
+        out = self.init(speech)  # [n spec_d l] -> [n c l]
+        out = self.attn(out)
+        return out[:, :, 0]  # [n c l] -> [n c] (the first element)
+
+
 class Tortoise(nn.Module):
     def __init__(self, config: TortoiseConfig):
         super().__init__()
@@ -114,10 +156,15 @@ class Tortoise(nn.Module):
 
 if __name__ == '__main__':
     torch.set_default_device("cuda")
-    tortoise = Tortoise(TortoiseConfig()).eval()
+    t_config = TortoiseConfig()
+    conditioning_encoder = ConditioningEncoder(t_config, spec_dim=80)
+    conditioning_latent = conditioning_encoder(speech=torch.randn(1, 80, 3272))
+    print(conditioning_latent.shape)
+
+    tortoise = Tortoise(t_config).eval()
     l_text, l_mel, mel_log = tortoise(
-        text_inputs=torch.randint(high=120, size=(2, 250)),
-        mel_inputs=torch.randint(high=8192, size=(2, 250)),
-        speech_conditioning_latent=torch.randn(2, 1024),
+        text_inputs=torch.randint(high=120, size=(1, 250)),
+        mel_inputs=torch.randint(high=8192, size=(1, 250)),
+        speech_conditioning_latent=conditioning_latent,
     )
     print(l_text)
