@@ -21,19 +21,19 @@ class TortoiseConfig:
         n_embd: Operating dimensions of the transformer
         n_head: Number of transformer heads. Must be divisible by model_dim. Recommend model_dim//64
         max_text_tokens: Maximum number of text tokens that will be encountered by model.
-        max_mel_tokens: Maximum number of MEL tokens that will be encountered by model.
+        max_speech_tokens: Maximum number of MEL tokens that will be encountered by model.
         max_conditioning_inputs: Maximum number of conditioning inputs provided to the model.
             If (1), conditioning input can be of format (b,80,s), otherwise (b,n,80,s).
-        mel_length_compression: The factor between <number_input_samples> and <mel_tokens>.
+        mel_length_compression: The factor between <number_input_samples> and <speech_tokens>.
             Used to compute MEL token padding given wav input length.
         n_text_token:
         start_text_token:
         stop_text_token:
-        n_mel_token:
-        start_mel_token:
-        stop_mel_token:
+        n_speech_token:
+        start_speech_token:
+        stop_speech_token:
         train_solo_embeddings:
-        use_mel_tokens_as_input:
+        use_speech_tokens_as_input:
         checkpointing:
     """
 
@@ -41,17 +41,17 @@ class TortoiseConfig:
     n_embd: int = 1024
     n_head: int = 16
     max_text_tokens: int = 402
-    max_mel_tokens: int = 604
+    max_speech_tokens: int = 604
     max_conditioning_inputs: int = 2
     mel_length_compression: int = 1024
     n_text_token: int = 255
     start_text_token: int = 255
     stop_text_token: int = 0
-    n_mel_token: int = 8194
-    start_mel_token: int = 8192
-    stop_mel_token: int = 8193
+    n_speech_token: int = 8194
+    start_speech_token: int = 8192
+    stop_speech_token: int = 8193
     train_solo_embeddings: bool = False
-    use_mel_tokens_as_input: bool = True
+    use_speech_tokens_as_input: bool = True
     checkpointing: bool = False
     n_type: int = 1
 
@@ -108,14 +108,14 @@ class Tortoise(nn.Module):
         super().__init__()
         self.start_text_token = config.start_text_token
         self.stop_text_token = config.stop_text_token
-        self.start_mel_token = config.start_mel_token
-        self.stop_mel_token = config.stop_mel_token
+        self.start_speech_token = config.start_speech_token
+        self.stop_speech_token = config.stop_speech_token
 
         self.embed_text = nn.Embedding(config.n_text_token * config.n_type + 1, config.n_embd)
-        self.embed_mel = nn.Embedding(config.n_mel_token * config.n_type + 1, config.n_embd)
+        self.embed_speech = nn.Embedding(config.n_speech_token * config.n_type + 1, config.n_embd)
         self.embed_pos_text = LearnedPositionEmbedding(config.max_text_tokens + 2, config.n_embd)
-        self.embed_pos_mel = LearnedPositionEmbedding(
-            config.max_mel_tokens + config.max_conditioning_inputs + 2, config.n_embd
+        self.embed_pos_speech = LearnedPositionEmbedding(
+            config.max_speech_tokens + config.max_conditioning_inputs + 2, config.n_embd
         )
 
         self.transformer = GPT(GPTConfig.from_tortoise_config(config))
@@ -123,38 +123,38 @@ class Tortoise(nn.Module):
         self.final_norm = nn.LayerNorm(config.n_embd)
 
         self.text_head = nn.Linear(config.n_embd, config.n_text_token * config.n_type + 1)
-        self.mel_head = nn.Linear(config.n_embd, config.n_mel_token * config.n_type + 1)
+        self.speech_head = nn.Linear(config.n_embd, config.n_speech_token * config.n_type + 1)
 
         self.embed_text.weight.data.normal_(mean=0.0, std=0.02)
 
     # TODO jaxtype
-    def forward(self, text_inputs: Tensor, mel_inputs: Tensor, speech_conditioning_latent: Tensor):
+    def forward(self, text_inputs: Tensor, speech_inputs: Tensor, speech_conditioning_latent: Tensor):
         text_inputs = pad(text_inputs, (0, 1), value=self.stop_text_token)
-        mel_inputs = pad(mel_inputs, (0, 1), value=self.stop_mel_token)
+        speech_inputs = pad(speech_inputs, (0, 1), value=self.stop_speech_token)
 
         condition = speech_conditioning_latent.unsqueeze(1)
 
         # build aligned inputs and targets
         text_targets = pad(text_inputs, (0, 1), value=self.stop_text_token)
         text_inputs = pad(text_inputs, (1, 0), value=self.start_text_token)
-        mel_targets = pad(mel_inputs, (0, 1), value=self.stop_mel_token)
-        mel_inputs = pad(mel_inputs, (1, 0), value=self.start_mel_token)
+        speech_targets = pad(speech_inputs, (0, 1), value=self.stop_speech_token)
+        speech_inputs = pad(speech_inputs, (1, 0), value=self.start_speech_token)
 
         text_emb = self.embed_text(text_inputs) + self.embed_pos_text(text_inputs)
         # TODO investigate raw mels
-        mel_emb = self.embed_mel(mel_inputs) + self.embed_pos_mel(mel_inputs)
-        emb = torch.cat([condition, text_emb, mel_emb], dim=1)
+        speech_emb = self.embed_speech(speech_inputs) + self.embed_pos_speech(speech_inputs)
+        emb = torch.cat([condition, text_emb, speech_emb], dim=1)
         enc = self.final_norm(self.transformer(emb)[0])
         text_logits = self.text_head(enc[:, : text_emb.shape[1]]).permute(0, 2, 1)
-        mel_logits = self.mel_head(enc[:, -mel_emb.shape[1] :]).permute(0, 2, 1)
-        # TODO check return latent
+        speech_logits = self.speech_head(enc[:, -speech_emb.shape[1] :]).permute(0, 2, 1)
+        latent = enc[:, -speech_emb.shape[1] : -2]  # -2 -> remove tokens added in this forward pass
 
         loss_text = cross_entropy(text_logits, text_targets.long())
-        loss_mel = cross_entropy(mel_logits, mel_targets.long())
-        return loss_text.mean(), loss_mel.mean(), mel_logits
+        loss_speech = cross_entropy(speech_logits, speech_targets.long())
+        return loss_text.mean(), loss_speech.mean(), speech_logits, latent
 
     @torch.inference_mode()
-    def generate_mel_tokens(
+    def generate_speech_tokens(
         self,
         input_ids,
         *,
@@ -179,14 +179,20 @@ class Tortoise(nn.Module):
 
         emb = torch.cat([condition, text_emb], dim=1)
 
-        mel_inputs = torch.tensor([[self.start_mel_token]])
-        print(mel_inputs.shape)
+        speech_inputs = torch.tensor([[self.start_speech_token]])
+        print(speech_inputs.shape)
         while True:
             # forward pass to get next token
-            mel_emb = self.embed_mel(mel_inputs) + self.embed_pos_mel(mel_inputs)
-            print(mel_emb.shape)
-            emb = torch.cat([emb, mel_emb], dim=1)
-            _hidden_state, logits, _loss = self.transformer(emb)
+            print(speech_inputs)
+            speech_inputs_idx = torch.where(
+                speech_inputs >= self.start_speech_token,  # special tokens
+                speech_inputs - self.start_speech_token,
+                speech_inputs,
+            )
+            speech_emb = self.embed_speech(speech_inputs_idx) + self.embed_pos_speech(speech_inputs)
+            print(speech_emb.shape)
+            gpt_emb = torch.cat([emb, speech_emb], dim=1)
+            _hidden_state, logits, _loss = self.transformer(gpt_emb)
             scores = logits[:, -1, :]
 
             # top p
@@ -202,10 +208,10 @@ class Tortoise(nn.Module):
             scores = scores / temperature
 
             # repetition penalty
-            score = torch.gather(scores, 1, mel_inputs)
+            score = torch.gather(scores, 1, speech_inputs_idx)
             # if score < 0 then repetition penalty has to be multiplied to reduce the previous token probability
             score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
-            scores.scatter_(1, mel_inputs, score)
+            scores.scatter_(1, speech_inputs_idx, score)
 
             # sample
             probs = nn.functional.softmax(scores, dim=-1)
@@ -217,7 +223,7 @@ class Tortoise(nn.Module):
                     raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
             # update generated ids, model inputs, and length for next step
-            mel_inputs = torch.cat([mel_inputs, next_tokens[:, None]], dim=-1)
+            speech_inputs = torch.cat([speech_inputs, next_tokens[:, None]], dim=-1)
 
             if eos_token_id_tensor is not None:
                 unfinished_sequences = unfinished_sequences.mul(
@@ -227,9 +233,9 @@ class Tortoise(nn.Module):
                 # stop when each sentence is finished
                 if unfinished_sequences.max() == 0:
                     break
-            if mel_inputs.shape[-1] >= max_length:
+            if speech_inputs.shape[-1] >= max_length:
                 break
-        return mel_inputs
+        return speech_inputs
 
 
 if __name__ == "__main__":
@@ -240,9 +246,9 @@ if __name__ == "__main__":
     print(conditioning_latent.shape)
 
     tortoise = Tortoise(t_config).eval()
-    l_text, l_mel, mel_log = tortoise(
+    l_text, l_speech, speech_log = tortoise(
         text_inputs=torch.randint(high=120, size=(1, 250)),
-        mel_inputs=torch.randint(high=8192, size=(1, 250)),
+        speech_inputs=torch.randint(high=8192, size=(1, 250)),
         speech_conditioning_latent=conditioning_latent,
     )
     print(l_text)
