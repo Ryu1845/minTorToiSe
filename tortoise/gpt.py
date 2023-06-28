@@ -14,9 +14,11 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
-from torch import nn
+from jaxtyping import Float
+from torch import Tensor, nn
 from torch.nn.functional import cross_entropy, softmax
 
 
@@ -52,6 +54,7 @@ class NewGELU(nn.Module):
         return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
+# TODO: use torch builtin attention
 class CausalSelfAttention(nn.Module):
     """
     A vanilla multi-head masked self-attention layer with a projection at the end.
@@ -162,8 +165,8 @@ class GPT(nn.Module):
                 torch.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
         # report number of parameters (note we don't count the decoder parameters in lm_head)
-        n_params = sum(p.numel() for p in self.transformer.parameters())
-        print(f"number of parameters: {n_params / 1e6:.2f}M")
+        # n_params = sum(p.numel() for p in self.transformer.parameters())
+        # print(f"number of parameters: {n_params / 1e6:.2f}M")
 
     # TODO convert to tortoise's GPT2InferenceModel
     """
@@ -209,7 +212,9 @@ class GPT(nn.Module):
         return model
     """
 
-    def forward(self, tok_emb, targets=None):
+    def forward(
+        self, tok_emb: Float[Tensor, "b t d"], targets=None
+    ) -> Tuple[Float[Tensor, "b t d"], Float[Tensor, "b t vocab_size"], Optional[Float[Tensor, "1"]]]:
         b, t, d = tok_emb.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
 
@@ -227,33 +232,9 @@ class GPT(nn.Module):
 
         return x, logits, loss
 
-    # TODO replace with temperature sampling
-    @torch.no_grad()
-    def generate(self, idx, max_new_tokens, *, do_sample: bool, temperature=1.0, top_k=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-        for _ in range(max_new_tokens):
-            # if the sequence context is growing too long we must crop it at block_size
-            idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size :]
-            # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
-            # pluck the logits at the final step and scale by desired temperature
-            logits = logits[:, -1, :] / temperature
-            # optionally crop the logits to only the top k options
-            if top_k is not None:
-                v, _ = torch.topk(logits, top_k)
-                logits[logits < v[:, [-1]]] = -float("Inf")
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = softmax(logits, dim=-1)
-            # either sample from the distribution or take the most likely element
-            if do_sample:
-                idx_next = torch.multinomial(probs, num_samples=1)
-            else:
-                _, idx_next = torch.topk(probs, k=1, dim=-1)
-            # append sampled index to the running sequence and continue
-            idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx
+if __name__ == "__main__":
+    gpt_config = GPTConfig()
+    gpt = GPT(gpt_config)
+    out, gpt_logits, gpt_loss = gpt(torch.randn((1, 23, gpt_config.n_embd)))
+    print(out.shape, gpt_logits.shape, gpt_loss)
