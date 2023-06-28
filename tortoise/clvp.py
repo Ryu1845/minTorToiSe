@@ -36,6 +36,7 @@ class GEGLU(nn.Module):
         return x * gelu(gates)
 
 
+# TODO: use torch builtin attention
 class SelfAttention(nn.Module):
     """
     A vanilla multi-head masked self-attention layer with a projection at the end.
