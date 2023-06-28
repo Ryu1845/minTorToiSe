@@ -39,8 +39,8 @@ class GPTConfig:
             config.n_embd,
             config.n_head,
             config.n_layer,
-            block_size=config.max_mel_tokens + config.max_conditioning_inputs + 2,
-            vocab_size=config.max_mel_tokens,
+            block_size=config.max_speech_tokens + config.max_conditioning_inputs + 2,
+            vocab_size=config.max_speech_tokens,
         )
 
 
