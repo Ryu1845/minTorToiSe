@@ -7,6 +7,7 @@ from torch import Tensor
 from tortoise.tokenizer import Tokenizer
 from tortoise.tortoise import ConditioningEncoder, Tortoise, TortoiseConfig
 from tortoise.clvp import CLVP, CLVPConfig
+from tortoise.vocoder import UnivNetGenerator
 
 
 class Inference:
@@ -18,6 +19,8 @@ class Inference:
         self.autoregressive = Tortoise(config).eval()
         self.tokenizer = Tokenizer()
         self.clvp = CLVP(CLVPConfig())
+        self.vocoder = UnivNetGenerator()
+        self.calm_token = 83  # token for coding silence # TODO: don't hardcode
 
     @torch.inference_mode()
     def __call__(
@@ -51,6 +54,34 @@ class Inference:
             speech_inputs=best_result,
             speech_conditioning_latent=conditioning_latent,
         )
+
+        # find 8 consecutive calm token and trim to that
+        c_token_cnt = 0
+        for idx, token in enumerate(best_result[0]):
+            if c_token_cnt == 8:
+                latent = latent[:, :idx]
+                break
+            if token == self.calm_token:
+                c_token_cnt += 1
+            else:
+                c_token_cnt = 0
+
+        # diffusion
+        output_len = (
+            latent.shape[1] * 4 * 24_000 // 22_050
+        )  # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
+        diffusion_temperature = 1  # TODO: don't hardcode
+        noise = torch.randn(latent.shape[0], 100, output_len) * diffusion_temperature
+        timestep_independant = self.diffusion.independant_timestep(latent)
+        mel = self.diffusion.sample(noise.shape, noise=noise, embeddings=timestep_independant)
+
+        MEL_MAX = 2.3143386840820312
+        MEL_MIN = -11.512925148010254
+        mel = ((mel + 1) / 2) * (MEL_MAX - MEL_MIN) + MEL_MIN  # denormalize
+        mel = mel[:, :, :output_len]
+
+        wav = self.vocoder.inference(mel)
+        return wav
 
 
 if __name__ == "__main__":
