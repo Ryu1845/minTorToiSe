@@ -17,8 +17,8 @@ def masked_mean(t, mask):
 class CLVPConfig:
     n_embd: int = 768
     n_head: int = 12
-    num_text_tokens: int = 256
-    num_speech_tokens: int = 8192
+    n_text_token: int = 256
+    n_speech_token: int = 8194
     text_enc_depth: int = 20
     speech_enc_depth: int = 20
     text_mask_percentage: float = 0.2
@@ -130,10 +130,10 @@ class CLVP(nn.Module):
 
     def __init__(self, config: CLVPConfig):
         super().__init__()
-        self.text_emb = nn.Embedding(config.num_text_tokens, config.n_embd)
+        self.text_emb = nn.Embedding(config.n_text_token, config.n_embd)
         self.to_text_latent = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
-        self.speech_emb = nn.Embedding(config.num_speech_tokens, config.n_embd)
+        self.speech_emb = nn.Embedding(config.n_speech_token, config.n_embd)
         self.to_speech_latent = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
         self.text_enc = Encoder(config, config.text_enc_depth)
@@ -146,9 +146,9 @@ class CLVP(nn.Module):
         self.wav_token_compression = config.wav_token_compression
 
         self.text_pos_emb = nn.Embedding(config.text_seq_len, config.n_embd)
-        self.speech_pos_emb = nn.Embedding(config.num_speech_tokens, config.n_embd)
+        self.speech_pos_emb = nn.Embedding(config.n_speech_token, config.n_embd)
 
-    def forward(self, text, speech_tokens, *, return_loss):
+    def forward(self, text, speech_tokens, *, return_loss: bool):
         batch_size, device = text.shape[0], text.device
         if self.training:
             text_mask = torch.rand_like(text.float()) > self.text_mask_percentage
@@ -190,12 +190,12 @@ class CLVP(nn.Module):
 if __name__ == "__main__":
     _config = CLVPConfig(text_mask_percentage=0.2, voice_mask_percentage=0.2)
     clip = CLVP(_config)
-    loss = clip(
+    clip_loss = clip(
         torch.randint(0, 256, (2, 120)),
         torch.randint(0, 8192, (2, 250)),
         return_loss=True,
     )
-    print(loss)
+    print(clip_loss)
     nonloss = clip(
         torch.randint(0, 256, (2, 120)),
         torch.randint(0, 8192, (2, 250)),
