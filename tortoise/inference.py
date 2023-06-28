@@ -6,6 +6,7 @@ from torch import Tensor
 
 from tortoise.tokenizer import Tokenizer
 from tortoise.tortoise import ConditioningEncoder, Tortoise, TortoiseConfig
+from tortoise.clvp import CLVP, CLVPConfig
 
 
 class Inference:
@@ -16,28 +17,45 @@ class Inference:
         self.conditioning_encoder = ConditioningEncoder(config, spec_dim=80).eval()
         self.autoregressive = Tortoise(config).eval()
         self.tokenizer = Tokenizer()
+        self.clvp = CLVP(CLVPConfig())
 
     @torch.inference_mode()
-    def __call__(self, text: str, conditioning_speech: Float[Tensor, "n spec_d l"]):
+    def __call__(
+        self,
+        text: str,
+        conditioning_speech: Float[Tensor, "n spec_d l"],
+        samples_to_generate: int = 1,
+    ):
         input_ids: List[int] = self.tokenizer.encode(text)
-        text_inputs: Int[Tensor, "n l"] = torch.tensor(input_ids).unsqueeze(0)
+        text_inputs: Int[Tensor, "1 l"] = torch.tensor(input_ids).unsqueeze(0)
         conditioning_latent = self.conditioning_encoder(speech=conditioning_speech)
-        mel_inputs = self.autoregressive.generate_mel_tokens(
-            text_inputs, speech_conditioning_latent=conditioning_latent
-        )
 
-        l_text, l_mel, mel_logits = self.autoregressive(
+        samples = []
+        for _ in range(samples_to_generate):
+            sample_speech_tokens: Int[Tensor, "1 length_speech_output"] = self.autoregressive.generate_speech_tokens(
+                text_inputs, speech_conditioning_latent=conditioning_latent  # , max_length=80 # for testing
+            )
+            samples.append(sample_speech_tokens)
+
+        clvp_results = []
+        for sample in samples:
+            clvp_result = self.clvp(text_inputs, sample, return_loss=False)
+            # print(clvp_result)
+            clvp_results.append(clvp_result)
+        clvp_results = torch.cat(clvp_results, dim=0)
+        best_result = samples[torch.argmax(clvp_results)]
+        # print(best_result)
+
+        _loss_text, _loss_speech, _speech_logits, latent = self.autoregressive(
             text_inputs=text_inputs,
-            mel_inputs=torch.randint(high=8192, size=(1, 250)),
+            speech_inputs=best_result,
             speech_conditioning_latent=conditioning_latent,
         )
-        print(l_text, l_mel, mel_logits.shape)
 
 
 if __name__ == "__main__":
-    torch.manual_seed(0)
-    torch.set_default_device("cuda")
-    print("starting")
+    torch.manual_seed(1)
+    torch.set_default_device("cpu")
     inference = Inference()
     inference(
         "TorToiSe is a text-to-speech program that is capable of synthesizing speech "
