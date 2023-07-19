@@ -8,6 +8,7 @@ from tortoise.tokenizer import Tokenizer
 from tortoise.tortoise import ConditioningEncoder, Tortoise, TortoiseConfig
 from tortoise.clvp import CLVP, CLVPConfig
 from tortoise.vocoder import UnivNetGenerator
+from tortoise.diffuser import SpacedDiffuser
 
 
 class Inference:
@@ -19,6 +20,7 @@ class Inference:
         self.autoregressive = Tortoise(config).eval()
         self.tokenizer = Tokenizer()
         self.clvp = CLVP(CLVPConfig())
+        self.diffuser = SpacedDiffuser(config)
         self.vocoder = UnivNetGenerator()
         self.calm_token = 83  # token for coding silence # TODO: don't hardcode
 
@@ -72,8 +74,8 @@ class Inference:
         )  # This diffusion model converts from 22kHz spectrogram codes to a 24kHz spectrogram signal.
         diffusion_temperature = 1  # TODO: don't hardcode
         noise = torch.randn(latent.shape[0], 100, output_len) * diffusion_temperature
-        timestep_independant = self.diffusion.independant_timestep(latent)
-        mel = self.diffusion.sample(noise.shape, noise=noise, embeddings=timestep_independant)
+        timestep_independent = self.diffuser.independent_timestep(latent, output_len)
+        mel = self.diffuser.sample(noise=noise, embeddings=timestep_independent)
 
         MEL_MAX = 2.3143386840820312
         MEL_MIN = -11.512925148010254

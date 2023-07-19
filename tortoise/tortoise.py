@@ -75,12 +75,12 @@ class AttentionBlock(nn.Module):
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
     """
 
-    def __init__(self, config):
+    def __init__(self, n_embd: int, n_head: int):
         super().__init__()
-        self.norm = nn.GroupNorm(32, config.n_embd)
-        self.qkv = nn.Conv1d(config.n_embd, config.n_embd * 3, 1)
-        self.attention = nn.MultiheadAttention(config.n_embd, config.n_head)
-        self.proj_out = nn.Conv1d(config.n_embd, config.n_embd, kernel_size=1)
+        self.norm = nn.GroupNorm(32, n_embd)
+        self.qkv = nn.Conv1d(n_embd, n_embd * 3, 1)
+        self.attention = nn.MultiheadAttention(n_embd, n_head)
+        self.proj_out = nn.Conv1d(n_embd, n_embd, kernel_size=1)
 
     def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None):
         qkv = self.qkv(self.norm(x))  # [n c l] -> [n c*3 l]
@@ -95,7 +95,7 @@ class ConditioningEncoder(nn.Module):
     def __init__(self, config, spec_dim: int = 80):
         super().__init__()
         self.init = nn.Conv1d(spec_dim, config.n_embd, kernel_size=1)
-        self.attn = nn.Sequential(*(AttentionBlock(config) for _ in range(6)))
+        self.attn = nn.Sequential(*(AttentionBlock(config.n_embd, config.n_head) for _ in range(6)))
 
     def forward(self, speech: Float[Tensor, "batch spec_d length"]):
         out = self.init(speech)  # [n spec_d l] -> [n c l]
