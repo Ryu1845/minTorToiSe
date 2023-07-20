@@ -180,17 +180,17 @@ class Tortoise(nn.Module):
         emb = torch.cat([condition, text_emb], dim=1)
 
         speech_inputs = torch.tensor([[self.start_speech_token]])
-        print(speech_inputs.shape)
         while True:
             # forward pass to get next token
-            print(speech_inputs)
+            # print(speech_inputs)
+            print(f"Generated {speech_inputs.shape[1]} tokens", end='\r')
             speech_inputs_idx = torch.where(
                 speech_inputs >= self.start_speech_token,  # special tokens
                 speech_inputs - self.start_speech_token,
                 speech_inputs,
             )
             speech_emb = self.embed_speech(speech_inputs_idx) + self.embed_pos_speech(speech_inputs)
-            print(speech_emb.shape)
+            # print(speech_emb.shape)
             gpt_emb = torch.cat([emb, speech_emb], dim=1)
             _hidden_state, logits, _loss = self.transformer(gpt_emb)
             scores = logits[:, -1, :]
@@ -235,6 +235,7 @@ class Tortoise(nn.Module):
                     break
             if speech_inputs.shape[-1] >= max_length:
                 break
+        print()
         return speech_inputs
 
 

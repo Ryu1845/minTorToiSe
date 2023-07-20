@@ -24,9 +24,10 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
+    "torch",
+    "torchaudio",
     "einops",
     "jaxtyping",
-    "torch",
     "tokenizers",
     "unidecode",
     "inflect",

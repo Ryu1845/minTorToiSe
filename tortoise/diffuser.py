@@ -33,9 +33,7 @@ def space_timesteps(n_timestep: int, section_counts: List[int]):
 
     Args:
         n_timestep: the number of diffusion steps in the original process to divide up.
-        section_counts: either a list of numbers, or a string containing comma-separated numbers,
-            indicating the step count per section. As a special case, use "ddimN" where N is a number
-            of steps to use the striding from the DDIM paper.
+        section_counts:
 
     Returns:
         a set of diffusion steps from the original process to use.
@@ -64,7 +62,7 @@ def space_timesteps(n_timestep: int, section_counts: List[int]):
 
 
 def into_tensor(array: np.ndarray, from_timesteps: Tensor, broadcast_shape: torch.Size):
-    result = torch.from_numpy(array)[from_timesteps].float()
+    result = torch.from_numpy(array).to(from_timesteps.device)[from_timesteps].float()
     return result.expand(broadcast_shape)
 
 
@@ -116,10 +114,12 @@ class ResBlock(nn.Module):
 
     def forward(self, inputs: Tensor, embeddings: Tensor):
         outputs = self.in_layers(inputs)
+        outputs = self.out_norm(outputs)
+        outputs = rearrange(outputs, "n c l -> n l c")
         embeddings_out = self.embedding_layers(embeddings)
         scale, shift = torch.chunk(embeddings_out, chunks=2, dim=1)
-        print(outputs.shape)
-        outputs = self.out_norm(outputs) * (1 - scale) + shift
+        outputs = outputs * (1 - scale) + shift
+        outputs = rearrange(outputs, "n l c -> n c l")
         outputs = self.out_layers(outputs)
         return inputs + outputs
 
@@ -143,6 +143,7 @@ class SpaceDiffuserConfig:
     in_channels: int = 100
     out_channels: int = 200
     latent_channels: int = 1024
+    conditioning_free_k: int = 2
     betas: np.ndarray = field(default_factory=lambda: LINEAR_BETA_SCHEDULE)
     timesteps: Set[int] = field(default_factory=lambda: space_timesteps(4000, [200]))
 
@@ -151,7 +152,7 @@ class SpacedDiffuser(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.n_embd = config.n_embd
-        self.n_timestep = config.betas.shape[0]
+        self.conditioning_free_k = config.conditioning_free_k
 
         betas = np.array(config.betas, dtype=np.float64)  # for more precision
         alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
@@ -162,8 +163,9 @@ class SpacedDiffuser(nn.Module):
             if idx in config.timesteps:
                 betas.append(1 - alpha_cumprod / last_alpha_cumprod)
                 last_alpha_cumprod = alpha_cumprod
+        self.n_timestep = len(betas)
 
-        betas = np.array(betas, dtype=np.float64)
+        self.betas = betas = np.array(betas, dtype=np.float64)
         alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
 
         self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod)
@@ -171,7 +173,7 @@ class SpacedDiffuser(nn.Module):
 
         alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
         self.posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        self.posterior_log_variance_clipped = np.log(np.append(self.posterior_variance[1], self.posterior_variance[:1]))
+        self.posterior_log_variance_clipped = np.log(np.append(self.posterior_variance[1], self.posterior_variance[1:]))
         self.posterior_mean_coef1 = betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)
         self.posterior_mean_coef2 = (1.0 - alphas_cumprod_prev) * np.sqrt(1.0 - betas) / (1.0 - alphas_cumprod)
 
@@ -188,6 +190,7 @@ class SpacedDiffuser(nn.Module):
             nn.Linear(config.n_embd, config.n_embd), nn.SiLU(), nn.Linear(config.n_embd, config.n_embd)
         )
         self.norm = nn.GroupNorm(32, config.n_embd)
+        self.integrating_conv = nn.Conv1d(in_channels=config.n_embd * 2, out_channels=config.n_embd, kernel_size=1)
         self.layers = nn.ModuleList(
             [DiffusionLayer(config.n_embd, config.p_dropout, config.n_head) for _ in range(config.n_layer)]
             + [ResBlock(config.n_embd, config.p_dropout) for _ in range(3)]
@@ -222,6 +225,7 @@ class SpacedDiffuser(nn.Module):
         code_embedding = self.conditioning_timestep_integrator(code_embedding, time_embedding)
         inputs = self.input_block(inputs)
         inputs = torch.cat([inputs, code_embedding], dim=1)
+        inputs = self.integrating_conv(inputs)
         for layer in self.layers:
             inputs = layer(inputs, time_embedding)
         return self.out(inputs)
@@ -239,8 +243,7 @@ class SpacedDiffuser(nn.Module):
     def sample(self, noise: Tensor, embeddings: Tensor):
         # TODO: find another variable name for noise
         for i in reversed(range(self.n_timestep)):
-            # TODO: can probably get rid of it somehow
-            timesteps = tensor([i])  # assume batch size is one since we're implementing inference
+            timesteps = tensor([i])  # assumes batch size is one
             # p mean variance
             _batch_size, n_channel = noise.shape[:2]
             output = self(noise, timesteps, precomputed_embeddings=embeddings, conditioning_free=False)
@@ -270,17 +273,19 @@ class SpacedDiffuser(nn.Module):
             assert mean.shape == log_variance.shape == predicted_xstart.shape == noise.shape
 
             new_noise = torch.rand_like(noise)
-            non_zero_mask = (timesteps != 0).view(
-                -1, 1, 1, 1
-            )  # no noise when t == 0 # TODO: nb of ones should be shape[0]
+            non_zero_mask = (timesteps != 0).view(-1, 1)  # no noise when t == 0 # TODO: nb of ones should be batch size
             # TODO: check cond_fn
             sample = mean + non_zero_mask * torch.exp(0.5 * log_variance) * new_noise
             noise = sample
+        return noise
 
 
 if __name__ == '__main__':
-    diffuser = SpacedDiffuser(SpaceDiffuserConfig())
-    test_input = torch.randn(1, 100, 1024)
-    timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 1024)
+    torch.manual_seed(1)
+    torch.set_default_device("cuda:0")
+    test_config = SpaceDiffuserConfig()
+    diffuser = SpacedDiffuser(test_config)
+    timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 348)
+    test_input = torch.randn(1, 100, 348)
     mel = diffuser.sample(test_input, timestep_independent)
-    print(mel)
+    print(mel.shape)

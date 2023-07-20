@@ -8,7 +8,7 @@ from tortoise.tokenizer import Tokenizer
 from tortoise.tortoise import ConditioningEncoder, Tortoise, TortoiseConfig
 from tortoise.clvp import CLVP, CLVPConfig
 from tortoise.vocoder import UnivNetGenerator
-from tortoise.diffuser import SpacedDiffuser
+from tortoise.diffuser import SpacedDiffuser, SpaceDiffuserConfig
 
 
 class Inference:
@@ -20,7 +20,7 @@ class Inference:
         self.autoregressive = Tortoise(config).eval()
         self.tokenizer = Tokenizer()
         self.clvp = CLVP(CLVPConfig())
-        self.diffuser = SpacedDiffuser(config)
+        self.diffuser = SpacedDiffuser(SpaceDiffuserConfig())
         self.vocoder = UnivNetGenerator()
         self.calm_token = 83  # token for coding silence # TODO: don't hardcode
 
@@ -35,13 +35,16 @@ class Inference:
         text_inputs: Int[Tensor, "1 l"] = torch.tensor(input_ids).unsqueeze(0)
         conditioning_latent = self.conditioning_encoder(speech=conditioning_speech)
 
+        print(f"Generating {samples_to_generate} samples...")
         samples = []
-        for _ in range(samples_to_generate):
+        for i in range(samples_to_generate):
+            print(f"Generating sample nr {i}")
             sample_speech_tokens: Int[Tensor, "1 length_speech_output"] = self.autoregressive.generate_speech_tokens(
-                text_inputs, speech_conditioning_latent=conditioning_latent  # , max_length=80 # for testing
+                text_inputs, speech_conditioning_latent=conditioning_latent, max_length=80  # for testing
             )
             samples.append(sample_speech_tokens)
 
+        print("Ranking samples...")
         clvp_results = []
         for sample in samples:
             clvp_result = self.clvp(text_inputs, sample, return_loss=False)
@@ -51,6 +54,7 @@ class Inference:
         best_result = samples[torch.argmax(clvp_results)]
         # print(best_result)
 
+        print("Generating latent...")
         _loss_text, _loss_speech, _speech_logits, latent = self.autoregressive(
             text_inputs=text_inputs,
             speech_inputs=best_result,
@@ -68,6 +72,7 @@ class Inference:
             else:
                 c_token_cnt = 0
 
+        print("Generating mel spectrogram...")
         # diffusion
         output_len = (
             latent.shape[1] * 4 * 24_000 // 22_050
@@ -82,16 +87,22 @@ class Inference:
         mel = ((mel + 1) / 2) * (MEL_MAX - MEL_MIN) + MEL_MIN  # denormalize
         mel = mel[:, :, :output_len]
 
+        print("Generating waveform...")
         wav = self.vocoder.inference(mel)
         return wav
 
 
 if __name__ == "__main__":
+    import torchaudio
+
     torch.manual_seed(1)
-    torch.set_default_device("cpu")
+    torch.set_default_device("cuda")
     inference = Inference()
-    inference(
+    wav_tensor = inference(
         "TorToiSe is a text-to-speech program that is capable of synthesizing speech "
         "in multiple voices with realistic prosody and intonation.",
         conditioning_speech=torch.randn(1, 80, 3272),
-    )
+    ).cpu()
+    print(wav_tensor.shape)
+    print("Saving output to test.wav...")
+    torchaudio.save("test.wav", wav_tensor.squeeze(0), 24_000)
