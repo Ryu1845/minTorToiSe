@@ -183,7 +183,7 @@ class Tortoise(nn.Module):
         while True:
             # forward pass to get next token
             # print(speech_inputs)
-            print(f"Generated {speech_inputs.shape[1]} tokens", end='\r')
+            print(f"Generated {speech_inputs.shape[1]} tokens", end="\r")
             speech_inputs_idx = torch.where(
                 speech_inputs >= self.start_speech_token,  # special tokens
                 speech_inputs - self.start_speech_token,

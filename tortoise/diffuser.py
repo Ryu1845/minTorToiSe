@@ -235,7 +235,7 @@ class SpacedDiffuser(nn.Module):
         embedding = self.latent_conditioner(latent)
         embedding = self.norm(embedding)
         # maybe add the self.training branch?
-        expanded_embedding = interpolate(embedding, size=seq_len, mode='nearest')
+        expanded_embedding = interpolate(embedding, size=seq_len, mode="nearest")
         return expanded_embedding
 
     # TODO: add comments describing p mean variance etc
@@ -280,7 +280,7 @@ class SpacedDiffuser(nn.Module):
         return noise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     torch.manual_seed(1)
     torch.set_default_device("cuda:0")
     test_config = SpaceDiffuserConfig()
