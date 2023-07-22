@@ -1,16 +1,17 @@
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 from einops import rearrange
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file, save_file
-from torch import einsum, nn
+from torch import Tensor, einsum, nn
 from torch.nn.functional import cross_entropy, gelu, normalize, softmax
 
 
-def masked_mean(t, mask):
+def masked_mean(t: Tensor, mask: Tensor) -> Tensor:
     t = t.masked_fill(~mask[:, :, None], 0.0)
     return t.sum(dim=1) / mask.sum(dim=1)[..., None]
 
@@ -31,27 +32,27 @@ class CLVPConfig:
 
 
 class GLU(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.proj = nn.Linear(in_channels, out_channels * 2)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x, gates = self.proj(x).chunk(2, dim=-1)
         return x * gelu(gates)
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim: int):
         super().__init__()
         self.scale = dim**-0.5
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
         return x / norm.clamp(min=1e-8) * self.weight
 
 
-def apply_rope(x: torch.Tensor, freqs: torch.Tensor):
+def apply_rope(x: Tensor, freqs: Tensor) -> Tensor:
     seq_len = x.shape[2]
     freqs = freqs[:, :, -seq_len:]
 
@@ -70,7 +71,7 @@ class SelfAttention(nn.Module):
     explicit implementation here to show that there is nothing too scary here.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: CLVPConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -83,7 +84,7 @@ class SelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
-    def forward(self, x: torch.Tensor, rope_freqs: torch.Tensor, mask=None):
+    def forward(self, x: torch.Tensor, rope_freqs: torch.Tensor, mask: Optional[Tensor] = None) -> Tensor:
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -113,7 +114,7 @@ class SelfAttention(nn.Module):
 class Block(nn.Module):
     """a Transformer block with GLU"""
 
-    def __init__(self, config):
+    def __init__(self, config: CLVPConfig):
         super().__init__()
         self.norm_attn = RMSNorm(config.n_embd)
         self.attn = SelfAttention(config)
@@ -128,7 +129,7 @@ class Block(nn.Module):
             )
         )
 
-    def forward(self, x: torch.Tensor, rope_freqs: torch.Tensor, mask=None):
+    def forward(self, x: torch.Tensor, rope_freqs: torch.Tensor, mask: Optional[Tensor] = None) -> Tensor:
         x = x + self.attn(self.norm_attn(x), mask=mask, rope_freqs=rope_freqs)
         x = x + self.mlp(self.norm_mlp(x))
         return x
@@ -137,12 +138,12 @@ class Block(nn.Module):
 class Encoder(nn.Module):
     """Just a bunch of Blocks"""
 
-    def __init__(self, config, n_layer: int):
+    def __init__(self, config: CLVPConfig, n_layer: int):
         super().__init__()
         self.layers = nn.ModuleList([Block(config) for _ in range(n_layer)])
         self.norm = nn.LayerNorm(config.n_embd)
 
-    def forward(self, inputs: torch.Tensor, rope_freqs: torch.Tensor, mask=None):
+    def forward(self, inputs: torch.Tensor, rope_freqs: torch.Tensor, mask: Optional[Tensor] = None) -> Tensor:
         x = inputs
         for layer in self.layers:
             x = layer(x, mask=mask, rope_freqs=rope_freqs)
@@ -193,7 +194,7 @@ class CLVP(nn.Module):
 
         self.wav_token_compression = config.wav_token_compression
 
-    def forward(self, text, speech_tokens, *, return_loss: bool):
+    def forward(self, text, speech_tokens, *, return_loss: bool) -> Tensor:
         batch_size, device = text.shape[0], text.device
         text_mask = torch.ones_like(text.float()).bool()
         voice_mask = torch.ones_like(speech_tokens.float()).bool()
@@ -225,7 +226,7 @@ class CLVP(nn.Module):
         return loss
 
     @classmethod
-    def convert_old(cls):
+    def convert_old(cls) -> "CLVP":
         model = cls(CLVPConfig())
         model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="clvp2.safetensors")
         old_state_dict = load_file(model_path, device="cuda")

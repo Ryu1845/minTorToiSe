@@ -4,11 +4,11 @@ import torch
 from jaxtyping import Float, Int
 from torch import Tensor
 
-from tortoise.tokenizer import Tokenizer
-from tortoise.tortoise import ConditioningEncoder, Tortoise, TortoiseConfig
+from tortoise.autoregressive import ConditioningEncoder, Tortoise, TortoiseConfig
 from tortoise.clvp import CLVP, CLVPConfig
-from tortoise.vocoder import UnivNetGenerator
 from tortoise.diffuser import SpacedDiffuser, SpaceDiffuserConfig
+from tortoise.tokenizer import Tokenizer
+from tortoise.vocoder import UnivNetGenerator
 
 
 class Inference:
@@ -30,7 +30,7 @@ class Inference:
         text: str,
         conditioning_speech: Float[Tensor, "n spec_d l"],
         samples_to_generate: int = 1,
-    ):
+    ) -> Tensor:
         input_ids: List[int] = self.tokenizer.encode(text)
         text_inputs: Int[Tensor, "1 l"] = torch.tensor(input_ids).unsqueeze(0)
         conditioning_latent = self.conditioning_encoder(speech=conditioning_speech)

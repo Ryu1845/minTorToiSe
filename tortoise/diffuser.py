@@ -1,16 +1,19 @@
 import math
+import sys
 from dataclasses import dataclass, field
-from typing import List, Set, Optional
+from typing import List, Optional, Set
 
 import numpy as np
 import torch
 from einops import rearrange
-from torch import nn, Tensor, inference_mode, tensor
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
+from torch import Tensor, inference_mode, nn, tensor
 from torch.nn.functional import interpolate
 
-from tortoise.tortoise import AttentionBlock
+from tortoise.autoregressive import AttentionBlock
 
-LINEAR_BETA_SCHEDULE = np.linspace(
+LINEAR_BETA_SCHEDULE: np.ndarray = np.linspace(
     0.25 * 0.0001,  # beta_start = (1000/trained_diffusion_steps)*0.0001
     0.25 * 0.02,  # beta_end
     4000,  # trained_diffusion_steps
@@ -18,7 +21,7 @@ LINEAR_BETA_SCHEDULE = np.linspace(
 )
 
 
-def space_timesteps(n_timestep: int, section_counts: List[int]):
+def space_timesteps(n_timestep: int, section_counts: List[int]) -> Set[int]:
     """
     Create a list of timesteps to use from an original diffusion process,
     given the number of timesteps we want to take from equally-sized portions
@@ -45,11 +48,12 @@ def space_timesteps(n_timestep: int, section_counts: List[int]):
     for idx, section_count in enumerate(section_counts):
         size = size_per + (1 if idx < extra else 0)
         if size < section_count:
-            raise ValueError(f"Cannot divide section of {size} steps into {section_count}")
+            msg = f"Cannot divide section of {size} steps into {section_count}"
+            raise ValueError(msg)
         if section_count <= 1:
             frac_stride = 1
         else:
-            frac_stride = (size - 1) / (section_count - 1)
+            frac_stride = (size - 1) // (section_count - 1)
 
         current_idx = 0.0
         steps_taken = []
@@ -61,12 +65,12 @@ def space_timesteps(n_timestep: int, section_counts: List[int]):
     return set(all_steps)
 
 
-def into_tensor(array: np.ndarray, from_timesteps: Tensor, broadcast_shape: torch.Size):
+def into_tensor(array: np.ndarray, from_timesteps: Tensor, broadcast_shape: torch.Size) -> Tensor:
     result = torch.from_numpy(array).to(from_timesteps.device)[from_timesteps].float()
     return result.expand(broadcast_shape)
 
 
-def sin_timestep_embedding(timesteps: Tensor, dim: int, max_period: int = 10_000):
+def sin_timestep_embedding(timesteps: Tensor, dim: int, max_period: int = 10_000) -> Tensor:
     """
     Create sinusoidal timestep embeddings
     Args:
@@ -85,11 +89,11 @@ def sin_timestep_embedding(timesteps: Tensor, dim: int, max_period: int = 10_000
 
 
 class TimestepEmbedSequential(nn.Module):
-    def __init__(self, *layers):
+    def __init__(self, *layers: nn.Module):
         super().__init__()
         self.layers = layers
 
-    def forward(self, inputs: Tensor, emb: Tensor):
+    def forward(self, inputs: Tensor, emb: Tensor) -> Tensor:
         outputs = inputs
         for layer in self.layers:
             outputs = layer(outputs, emb)
@@ -112,7 +116,7 @@ class ResBlock(nn.Module):
             nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1),
         )
 
-    def forward(self, inputs: Tensor, embeddings: Tensor):
+    def forward(self, inputs: Tensor, embeddings: Tensor) -> Tensor:
         outputs = self.in_layers(inputs)
         outputs = self.out_norm(outputs)
         outputs = rearrange(outputs, "n c l -> n l c")
@@ -130,7 +134,7 @@ class DiffusionLayer(nn.Module):
         self.resblock = ResBlock(channels, p_dropout)
         self.attention = AttentionBlock(channels, n_head)
 
-    def forward(self, inputs: Tensor, time_embeddings: Tensor):
+    def forward(self, inputs: Tensor, time_embeddings: Tensor) -> Tensor:
         return self.attention(self.resblock(inputs, time_embeddings))
 
 
@@ -149,12 +153,12 @@ class SpaceDiffuserConfig:
 
 
 class SpacedDiffuser(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: SpaceDiffuserConfig):
         super().__init__()
         self.n_embd = config.n_embd
         self.conditioning_free_k = config.conditioning_free_k
 
-        betas = np.array(config.betas, dtype=np.float64)  # for more precision
+        betas: np.ndarray = np.array(config.betas, dtype=np.float64)  # for more precision
         alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
 
         betas = []
@@ -165,7 +169,8 @@ class SpacedDiffuser(nn.Module):
                 last_alpha_cumprod = alpha_cumprod
         self.n_timestep = len(betas)
 
-        self.betas = betas = np.array(betas, dtype=np.float64)
+        betas: np.ndarray = np.array(betas, dtype=np.float64)
+        self.betas = betas
         alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
 
         self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod)
@@ -215,11 +220,12 @@ class SpacedDiffuser(nn.Module):
         precomputed_embeddings: Optional[Tensor] = None,
         *,
         conditioning_free: bool,
-    ):
+    ) -> Tensor:
         batch_size, *_ = inputs.shape
         if conditioning_free:
             code_embedding = self.unconditioned_embedding.repeat(batch_size, 1, inputs.shape[-1])
         else:
+            assert precomputed_embeddings is not None, "precomputed_embeddings should be set when not conditioning free"
             code_embedding = precomputed_embeddings
         time_embedding = self.embed_time(sin_timestep_embedding(timesteps, self.n_embd))
         code_embedding = self.conditioning_timestep_integrator(code_embedding, time_embedding)
@@ -230,7 +236,7 @@ class SpacedDiffuser(nn.Module):
             inputs = layer(inputs, time_embedding)
         return self.out(inputs)
 
-    def independent_timestep(self, latent: Tensor, seq_len: int):
+    def independent_timestep(self, latent: Tensor, seq_len: int) -> Tensor:
         latent = rearrange(latent, "b s c -> b c s")
         embedding = self.latent_conditioner(latent)
         embedding = self.norm(embedding)
@@ -240,7 +246,7 @@ class SpacedDiffuser(nn.Module):
 
     # TODO: add comments describing p mean variance etc
     @inference_mode()
-    def sample(self, noise: Tensor, embeddings: Tensor):
+    def sample(self, noise: Tensor, embeddings: Tensor) -> Tensor:
         # TODO: find another variable name for noise
         for i in reversed(range(self.n_timestep)):
             timesteps = tensor([i])  # assumes batch size is one
@@ -279,12 +285,20 @@ class SpacedDiffuser(nn.Module):
             noise = sample
         return noise
 
+    @classmethod
+    def convert_old(cls) -> "SpacedDiffuser":
+        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="diffusion_decoder.safetensors")
+        old_state_dict = load_file(model_path, device="cuda")
+        model = cls(SpaceDiffuserConfig())
+        model.load_state_dict(old_state_dict)
+        return model
+
 
 if __name__ == "__main__":
     torch.manual_seed(1)
     torch.set_default_device("cuda:0")
-    test_config = SpaceDiffuserConfig()
-    diffuser = SpacedDiffuser(test_config)
+    diffuser = SpacedDiffuser.convert_old()
+    sys.exit()
     timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 348)
     test_input = torch.randn(1, 100, 348)
     mel = diffuser.sample(test_input, timestep_independent)

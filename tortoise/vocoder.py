@@ -1,7 +1,8 @@
+from typing import Tuple
+
 import torch
 from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
-from torch import nn
+from torch import nn, Tensor
 from torch.nn.functional import pad
 
 MAX_WAV_VALUE = 32768.0
@@ -72,7 +73,7 @@ class KernelPredictor(torch.nn.Module):
             nn.Conv1d(kpnet_hidden_channels, kpnet_bias_channels, kpnet_conv_size, padding=padding, bias=True)
         )
 
-    def forward(self, c):
+    def forward(self, c: Tensor):
         """
         Args:
             c (Tensor): the conditioning sequence (batch, cond_channels, cond_length)
@@ -115,16 +116,16 @@ class LVCBlock(torch.nn.Module):
 
     def __init__(
         self,
-        in_channels,
-        cond_channels,
-        stride,
-        dilations=(1, 3, 9, 27),
-        lrelu_slope=0.2,
-        conv_kernel_size=3,
-        cond_hop_length=256,
-        kpnet_hidden_channels=64,
-        kpnet_conv_size=3,
-        kpnet_dropout=0.0,
+        in_channels: int,
+        cond_channels: int,
+        stride: int,
+        dilations: Tuple[int, int, int, int] = (1, 3, 9, 27),
+        lrelu_slope: float = 0.2,
+        conv_kernel_size: int = 3,
+        cond_hop_length: int = 256,
+        kpnet_hidden_channels: int = 64,
+        kpnet_conv_size: int = 3,
+        kpnet_dropout: float = 0.0,
     ):
         super().__init__()
 
@@ -300,13 +301,13 @@ class UnivNetGenerator(nn.Module):
         )
 
     @classmethod
-    def from_pretrained(cls):
+    def from_pretrained(cls) -> "UnivNetGenerator":
         model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="vocoder.pth")
         model = cls()
         model.load_state_dict(torch.load(model_path)["model_g"])
         return model
 
-    def forward(self, c, z):
+    def forward(self, c: Tensor, z: Tensor) -> Tensor:
         """
         Args:
             c (Tensor): the conditioning sequence of mel-spectrogram (batch, mel_channels, in_length)
@@ -323,11 +324,12 @@ class UnivNetGenerator(nn.Module):
 
         return z
 
-    def eval(self, inference=False):
+    def eval(self, inference: bool = False):  # noqa: A003
         super().eval()
         # don't remove weight norm while validation in training loop
         if inference:
             self.remove_weight_norm()
+        return self
 
     def remove_weight_norm(self):
         nn.utils.remove_weight_norm(self.conv_pre)
@@ -355,7 +357,7 @@ class UnivNetGenerator(nn.Module):
 
 
 if __name__ == "__main__":
-    _vocoder = UnivNetGenerator.from_pretrained()
+    _vocoder = UnivNetGenerator.from_pretrained().eval(inference=True)
 
     c = torch.randn(3, 100, 10)
     z = torch.randn(3, 64, 10)

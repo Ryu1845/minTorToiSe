@@ -14,12 +14,15 @@ https://github.com/huggingface/transformers/blob/main/src/transformers/models/gp
 import math
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 
 import torch
 from jaxtyping import Float
 from torch import Tensor, nn
 from torch.nn.functional import cross_entropy, softmax
+
+if TYPE_CHECKING:
+    from tortoise.autoregressive import TortoiseConfig
 
 
 @dataclass
@@ -34,7 +37,7 @@ class GPTConfig:
     embd_pdrop: float = 0.1
 
     @classmethod
-    def from_tortoise_config(cls, config):
+    def from_tortoise_config(cls, config: TortoiseConfig) -> "GPTConfig":
         return cls(
             config.n_embd,
             config.n_head,
@@ -50,7 +53,7 @@ class NewGELU(nn.Module):
     Reference: Gaussian Error Linear Units (GELU) paper: https://arxiv.org/abs/1606.08415
     """
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
@@ -62,7 +65,7 @@ class CausalSelfAttention(nn.Module):
     explicit implementation here to show that there is nothing too scary here.
     """
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -82,7 +85,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
@@ -107,7 +110,7 @@ class CausalSelfAttention(nn.Module):
 class Block(nn.Module):
     """an unassuming Transformer block"""
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
@@ -123,7 +126,7 @@ class Block(nn.Module):
             )
         )
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
@@ -132,7 +135,7 @@ class Block(nn.Module):
 class GPT(nn.Module):
     """GPT Language Model without input embedding"""
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -143,7 +146,7 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
 
-    def __init__(self, config):
+    def __init__(self, config: GPTConfig):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
@@ -213,7 +216,7 @@ class GPT(nn.Module):
     """
 
     def forward(
-        self, tok_emb: Float[Tensor, "b t d"], targets=None
+        self, tok_emb: Float[Tensor, "b t d"], targets: Optional[Float[Tensor, "b t d"]] = None
     ) -> Tuple[Float[Tensor, "b t d"], Float[Tensor, "b t vocab_size"], Optional[Float[Tensor, "1"]]]:
         b, t, d = tok_emb.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"

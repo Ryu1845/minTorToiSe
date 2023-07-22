@@ -1,5 +1,6 @@
 import re
 from os import path
+from typing import List
 
 from inflect import engine
 from tokenizers import Tokenizer as _Tokenizer
@@ -46,18 +47,18 @@ class CleaningPipeline:
     def __init__(self, text: str):
         self.text = text
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.text
 
-    def ascii(self):
+    def ascii(self) -> "CleaningPipeline":  # noqa: A003
         self.text = unidecode(self.text)
         return self
 
-    def lower(self):
+    def lower(self) -> "CleaningPipeline":
         self.text = self.text.lower()
         return self
 
-    def expand_numbers(self):
+    def expand_numbers(self) -> "CleaningPipeline":
         def remove_commas(match: re.Match) -> str:
             return match.group(1).replace(",", "")
 
@@ -98,12 +99,12 @@ class CleaningPipeline:
         self.text = re.sub(self.number_re, expand_number, text)
         return self
 
-    def expand_abbreviations(self):
+    def expand_abbreviations(self) -> "CleaningPipeline":
         for regex, replacement in self.abbreviations:
             self.text = re.sub(regex, replacement, self.text)
         return self
 
-    def collapse_whitespace(self):
+    def collapse_whitespace(self) -> "CleaningPipeline":
         self.text = re.sub(self.whitespace_re, " ", self.text)
         return self
 
@@ -112,13 +113,13 @@ class Tokenizer:
     def __init__(self):
         self.tokenizer = _Tokenizer.from_file(path.join(path.dirname(__file__), "tokenizer.json"))
 
-    def encode(self, text: str):
+    def encode(self, text: str) -> List[int]:
         pipeline = CleaningPipeline(text).ascii().lower().expand_numbers().expand_abbreviations().collapse_whitespace()
         processed_text = str(pipeline).replace('"', "").replace(" ", "[SPACE]")
         return self.tokenizer.encode(processed_text).ids
 
     # TODO: jaxtype
-    def decode(self, sequence: Tensor):
+    def decode(self, sequence: Tensor) -> str:
         text: str = self.tokenizer.decode(sequence.cpu().numpy(), skip_special_tokens=False)
         text = text.replace(" ", "").replace("[SPACE]", " ").replace("[STOP]", "").replace("[UNK]", "")
         return text

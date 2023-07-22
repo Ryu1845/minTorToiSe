@@ -2,7 +2,7 @@
 The TorToiSe autoregressive model
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from einops import rearrange
@@ -62,7 +62,7 @@ class LearnedPositionEmbedding(nn.Module):
         self.emb = nn.Embedding(seq_len, n_embd)
         self.emb.weight.data.normal_(mean=0.0, std=init)
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor) -> Tensor:
         seq_len = x.shape[1]
         return self.emb(torch.arange(0, seq_len, device=x.device))
 
@@ -82,7 +82,7 @@ class AttentionBlock(nn.Module):
         self.attention = nn.MultiheadAttention(n_embd, n_head)
         self.proj_out = nn.Conv1d(n_embd, n_embd, kernel_size=1)
 
-    def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None):
+    def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None) -> Tensor:
         qkv = self.qkv(self.norm(x))  # [n c l] -> [n c*3 l]
         q, k, v = rearrange(qkv, "n c l -> n l c").chunk(3, dim=-1)  # [n c*3 l] -> 3 of [n l c]
         h, _ = self.attention(q, k, v, attn_mask=mask)
@@ -92,12 +92,12 @@ class AttentionBlock(nn.Module):
 
 
 class ConditioningEncoder(nn.Module):
-    def __init__(self, config, spec_dim: int = 80):
+    def __init__(self, config: TortoiseConfig, spec_dim: int = 80):
         super().__init__()
         self.init = nn.Conv1d(spec_dim, config.n_embd, kernel_size=1)
         self.attn = nn.Sequential(*(AttentionBlock(config.n_embd, config.n_head) for _ in range(6)))
 
-    def forward(self, speech: Float[Tensor, "batch spec_d length"]):
+    def forward(self, speech: Float[Tensor, "batch spec_d length"]) -> Tensor:
         out = self.init(speech)  # [n spec_d l] -> [n c l]
         out = self.attn(out)
         return out[:, :, 0]  # [n c l] -> [n c] (the first element)
@@ -128,7 +128,9 @@ class Tortoise(nn.Module):
         self.embed_text.weight.data.normal_(mean=0.0, std=0.02)
 
     # TODO jaxtype
-    def forward(self, text_inputs: Tensor, speech_inputs: Tensor, speech_conditioning_latent: Tensor):
+    def forward(
+        self, text_inputs: Tensor, speech_inputs: Tensor, speech_conditioning_latent: Tensor
+    ) -> Tuple[Tensor, ...]:
         text_inputs = pad(text_inputs, (0, 1), value=self.stop_text_token)
         speech_inputs = pad(speech_inputs, (0, 1), value=self.stop_speech_token)
 
@@ -156,19 +158,17 @@ class Tortoise(nn.Module):
     @torch.inference_mode()
     def generate_speech_tokens(
         self,
-        input_ids,
+        input_ids: Tensor,
         *,
         speech_conditioning_latent: Tensor,
         repetition_penalty: float = 2.0,
         temperature: float = 0.2,
         top_p: float = 0.8,
-        eos_token_id: int = 0,
+        eos_token_id: Optional[int] = None,
         pad_token_id: int = 0,
         max_length: int = 250,
-    ):
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
+    ) -> Tensor:
+        eos_token_id_tensor = torch.tensor([eos_token_id]).to(input_ids.device) if eos_token_id is not None else None
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
         condition = speech_conditioning_latent.unsqueeze(1)
@@ -220,7 +220,8 @@ class Tortoise(nn.Module):
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:
-                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
+                    msg = "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."
+                    raise ValueError(msg)
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
             # update generated ids, model inputs, and length for next step
             speech_inputs = torch.cat([speech_inputs, next_tokens[:, None]], dim=-1)
@@ -247,7 +248,7 @@ if __name__ == "__main__":
     print(conditioning_latent.shape)
 
     tortoise = Tortoise(t_config).eval()
-    l_text, l_speech, speech_log = tortoise(
+    l_text, l_speech, speech_log, latent = tortoise(
         text_inputs=torch.randint(high=120, size=(1, 250)),
         speech_inputs=torch.randint(high=8192, size=(1, 250)),
         speech_conditioning_latent=conditioning_latent,
