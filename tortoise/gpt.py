@@ -135,7 +135,7 @@ class Block(nn.Module):
 class GPT(nn.Module):
     """GPT Language Model without input embedding"""
 
-    def _init_weights(self, module: nn.Module):
+    def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:

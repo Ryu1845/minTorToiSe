@@ -194,7 +194,7 @@ class CLVP(nn.Module):
 
         self.wav_token_compression = config.wav_token_compression
 
-    def forward(self, text, speech_tokens, *, return_loss: bool) -> Tensor:
+    def forward(self, text: Tensor, speech_tokens: Tensor, *, return_loss: bool) -> Tensor:
         batch_size, device = text.shape[0], text.device
         text_mask = torch.ones_like(text.float()).bool()
         voice_mask = torch.ones_like(speech_tokens.float()).bool()
@@ -283,7 +283,7 @@ class CLVP(nn.Module):
         return model
 
     @classmethod
-    def from_pretrained(cls):
+    def from_pretrained(cls) -> "CLVP":
         model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="clvp.safetensors")
         model = cls(CLVPConfig())
         model.load_state_dict(load_file(model_path, device="cuda"))

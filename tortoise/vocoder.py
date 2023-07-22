@@ -73,7 +73,7 @@ class KernelPredictor(torch.nn.Module):
             nn.Conv1d(kpnet_hidden_channels, kpnet_bias_channels, kpnet_conv_size, padding=padding, bias=True)
         )
 
-    def forward(self, c: Tensor):
+    def forward(self, c: Tensor) -> Tuple[Tensor, Tensor]:
         """
         Args:
             c (Tensor): the conditioning sequence (batch, cond_channels, cond_length)
@@ -102,7 +102,7 @@ class KernelPredictor(torch.nn.Module):
 
         return kernels, bias
 
-    def remove_weight_norm(self):
+    def remove_weight_norm(self) -> None:
         nn.utils.remove_weight_norm(self.input_conv[0])
         nn.utils.remove_weight_norm(self.kernel_conv)
         nn.utils.remove_weight_norm(self.bias_conv)
@@ -206,7 +206,9 @@ class LVCBlock(torch.nn.Module):
 
         return x
 
-    def location_variable_convolution(self, x, kernel, bias, dilation=1, hop_size=256):
+    def location_variable_convolution(
+        self, x: Tensor, kernel: Tensor, bias: Tensor, dilation=1, hop_size=256
+    ) -> Tensor:
         """perform location-variable convolution operation on the input sequence (x) using the local convolution kernl.
         Time: 414 μs ± 309 ns per loop (mean ± std. dev. of 7 runs, 1000 loops each), test on NVIDIA V100.
         Args:

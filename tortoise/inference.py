@@ -96,7 +96,7 @@ if __name__ == "__main__":
     import torchaudio
 
     torch.manual_seed(1)
-    torch.set_default_device("cuda")
+    torch.set_default_device("cuda")  # type: ignore[no-untyped-call]
     inference = Inference()
     wav_tensor = inference(
         "TorToiSe is a text-to-speech program that is capable of synthesizing speech "
