@@ -1,4 +1,6 @@
 import torch
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file
 from torch import nn
 from torch.nn.functional import pad
 
@@ -297,6 +299,13 @@ class UnivNetGenerator(nn.Module):
             nn.Tanh(),
         )
 
+    @classmethod
+    def from_pretrained(cls):
+        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="vocoder.pth")
+        model = cls()
+        model.load_state_dict(torch.load(model_path)["model_g"])
+        return model
+
     def forward(self, c, z):
         """
         Args:
@@ -346,15 +355,15 @@ class UnivNetGenerator(nn.Module):
 
 
 if __name__ == "__main__":
-    model = UnivNetGenerator()
+    _vocoder = UnivNetGenerator.from_pretrained()
 
     c = torch.randn(3, 100, 10)
     z = torch.randn(3, 64, 10)
     print(c.shape)
 
-    y = model(c, z)
+    y = _vocoder(c, z)
     print(y.shape)
     assert y.shape == torch.Size([3, 1, 2560])
 
-    pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    pytorch_total_params = sum(p.numel() for p in _vocoder.parameters() if p.requires_grad)
     print(pytorch_total_params)
