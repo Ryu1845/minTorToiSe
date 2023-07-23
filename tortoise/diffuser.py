@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from einops import rearrange
 from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from torch import Tensor, inference_mode, nn, tensor
 from torch.nn.functional import interpolate
 
@@ -91,7 +91,7 @@ def sin_timestep_embedding(timesteps: Tensor, dim: int, max_period: int = 10_000
 class TimestepEmbedSequential(nn.Module):
     def __init__(self, *layers: nn.Module):
         super().__init__()
-        self.layers = layers
+        self.layers = nn.ModuleList(layers)
 
     def forward(self, inputs: Tensor, emb: Tensor) -> Tensor:
         outputs = inputs
@@ -109,8 +109,8 @@ class ResBlock(nn.Module):
             nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=1, padding=0),
         )
         self.embedding_layers = nn.Sequential(nn.SiLU(), nn.Linear(channels, 2 * channels))
-        self.out_norm = nn.GroupNorm(32, channels)
         self.out_layers = nn.Sequential(
+            nn.GroupNorm(32, channels),
             nn.SiLU(),
             nn.Dropout(p=p_dropout),
             nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=3, padding=1),
@@ -118,13 +118,14 @@ class ResBlock(nn.Module):
 
     def forward(self, inputs: Tensor, embeddings: Tensor) -> Tensor:
         outputs = self.in_layers(inputs)
-        outputs = self.out_norm(outputs)
+        out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+        outputs = out_norm(outputs)
         outputs = rearrange(outputs, "n c l -> n l c")
         embeddings_out = self.embedding_layers(embeddings)
         scale, shift = torch.chunk(embeddings_out, chunks=2, dim=1)
         outputs = outputs * (1 - scale) + shift
         outputs = rearrange(outputs, "n l c -> n c l")
-        outputs = self.out_layers(outputs)
+        outputs = out_rest(outputs)
         return inputs + outputs
 
 
@@ -289,17 +290,43 @@ class SpacedDiffuser(nn.Module):
     def convert_old(cls) -> "SpacedDiffuser":
         model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="diffusion_decoder.safetensors")
         old_state_dict = load_file(model_path, device="cuda")
+        name_changes = {
+            "attn": "attention",
+            "resblk": "resblock",
+            "time_embed": "embed_time",
+            "inp_block": "input_block",
+            "code_norm": "norm",
+            "emb_layers": "embedding_layers",
+            "conditioning_timestep_integrator": "conditioning_timestep_integrator.layers",
+        }
+        deleted_parts = ("code_converter", "mel_head", "contextual_embedder", "code_embedding")
+        new_state_dict = {}
+        for k, v in old_state_dict.items():
+            if any(pattern in k for pattern in deleted_parts):
+                continue
+            for pattern, replacement in name_changes.items():
+                if pattern in k:
+                    k = k.replace(pattern, replacement)  # noqa: PLW2901
+            new_state_dict[k] = v
         model = cls(SpaceDiffuserConfig())
-        model.load_state_dict(old_state_dict)
+        save_file(new_state_dict, "diffuser.safetensors")
+        model.load_state_dict(new_state_dict)
+        return model
+
+    @classmethod
+    def from_pretrained(cls):
+        model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="diffuser.safetensors")
+        model = cls(SpaceDiffuserConfig())
+        model.load_state_dict(load_file(model_path, device="cuda"))
         return model
 
 
 if __name__ == "__main__":
     torch.manual_seed(1)
     torch.set_default_device("cuda:0")
-    diffuser = SpacedDiffuser.convert_old()
-    sys.exit()
-    timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 348)
-    test_input = torch.randn(1, 100, 348)
-    mel = diffuser.sample(test_input, timestep_independent)
-    print(mel.shape)
+    with torch.inference_mode():
+        diffuser = SpacedDiffuser.from_pretrained()
+        timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 348)
+        test_input = torch.randn(1, 100, 348)
+        mel = diffuser.sample(test_input, timestep_independent)
+        print(mel.shape)

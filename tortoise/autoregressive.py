@@ -1,6 +1,7 @@
 """
 The TorToiSe autoregressive model
 """
+import math
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -8,7 +9,7 @@ import torch
 from einops import rearrange
 from jaxtyping import Float
 from torch import Tensor, nn
-from torch.nn.functional import cross_entropy, pad
+from torch.nn.functional import cross_entropy, pad, softmax
 
 from tortoise.gpt import GPT, GPTConfig
 
@@ -67,6 +68,47 @@ class LearnedPositionEmbedding(nn.Module):
         return self.emb(torch.arange(0, seq_len, device=x.device))
 
 
+class RelativePositionBias(nn.Module):
+    def __init__(self, scale, num_buckets=32, max_distance=128, heads=8):
+        super().__init__()
+        self.scale = scale
+        self.num_buckets = num_buckets
+        self.max_distance = max_distance
+        self.relative_attention_bias = nn.Embedding(num_buckets, heads)
+
+    @staticmethod
+    def _relative_position_bucket(relative_position, num_buckets=32, max_distance=128):
+        ret = 0
+        n = -relative_position
+        num_buckets //= 2
+        ret += (n < 0).long() * num_buckets
+        n = torch.abs(n)
+
+        max_exact = num_buckets // 2
+        is_small = n < max_exact
+
+        val_if_large = (
+            max_exact
+            + (torch.log(n.float() / max_exact) / math.log(max_distance / max_exact) * (num_buckets - max_exact)).long()
+        )
+        val_if_large = torch.min(val_if_large, torch.full_like(val_if_large, num_buckets - 1))
+
+        ret += torch.where(is_small, n, val_if_large)
+        return ret
+
+    def forward(self, qk_dots):
+        i, j, device = *qk_dots.shape[-2:], qk_dots.device
+        q_pos = torch.arange(i, dtype=torch.long, device=device)
+        k_pos = torch.arange(j, dtype=torch.long, device=device)
+        rel_pos = k_pos[None, :] - q_pos[:, None]
+        rp_bucket = self._relative_position_bucket(
+            rel_pos, num_buckets=self.num_buckets, max_distance=self.max_distance
+        )
+        values = self.relative_attention_bias(rp_bucket)
+        bias = rearrange(values, "i j h -> () h i j")
+        return qk_dots + (bias * self.scale)
+
+
 class AttentionBlock(nn.Module):
     """
     An attention block that allows spatial positions to attend to each other.
@@ -77,18 +119,35 @@ class AttentionBlock(nn.Module):
 
     def __init__(self, n_embd: int, n_head: int):
         super().__init__()
+        self.n_head = n_head
         self.norm = nn.GroupNorm(32, n_embd)
         self.qkv = nn.Conv1d(n_embd, n_embd * 3, 1)
-        self.attention = nn.MultiheadAttention(n_embd, n_head)
         self.proj_out = nn.Conv1d(n_embd, n_embd, kernel_size=1)
+        self.relative_pos_embeddings = RelativePositionBias(
+            scale=(n_embd // n_head) ** 0.5, heads=n_head, num_buckets=32, max_distance=64
+        )
 
     def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None) -> Tensor:
-        qkv = self.qkv(self.norm(x))  # [n c l] -> [n c*3 l]
-        q, k, v = rearrange(qkv, "n c l -> n l c").chunk(3, dim=-1)  # [n c*3 l] -> 3 of [n l c]
-        h, _ = self.attention(q, k, v, attn_mask=mask)
-        h = rearrange(h, "n l c -> n c l")
-        h = self.proj_out(h)  # [n c l] -> [n c l]
-        return x + h
+        b, c, l = x.size()  # batch size, embedding dimensionality (n_embd), sequence length
+
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q, k, v = self.qkv(x).split(c, dim=1)
+        q = q.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+        k = k.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+        v = v.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+
+        scale = 1 / math.sqrt(math.sqrt(c / self.n_head))
+        att = torch.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
+        att = self.relative_pos_embeddings(att.reshape(b, self.n_head, att.shape[-2], att.shape[-1])).reshape(
+            b * self.n_head, att.shape[-2], att.shape[-1]
+        )
+        if mask is not None:
+            mask = rearrange(mask, "b j -> b () () j")
+            att = att.masked_fill(mask, -1e10)
+        att = softmax(att, dim=-1)
+        att = torch.einsum("bts,bcs->bct", att, v)
+        att = att.reshape(b, -1, l)
+        return (x + self.proj_out(att)).reshape(b, c, l)
 
 
 class ConditioningEncoder(nn.Module):
@@ -244,7 +303,7 @@ if __name__ == "__main__":
     torch.set_default_device("cuda")
     t_config = TortoiseConfig()
     conditioning_encoder = ConditioningEncoder(t_config, spec_dim=80)
-    conditioning_latent = conditioning_encoder(speech=torch.randn(1, 80, 3272))
+    conditioning_latent = conditioning_encoder(speech=torch.randn(1, 80, 395))
     print(conditioning_latent.shape)
 
     tortoise = Tortoise(t_config).eval()

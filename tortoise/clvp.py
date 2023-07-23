@@ -1,4 +1,3 @@
-import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Optional
@@ -8,7 +7,7 @@ from einops import rearrange
 from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file, save_file
 from torch import Tensor, einsum, nn
-from torch.nn.functional import cross_entropy, gelu, normalize, softmax
+from torch.nn.functional import cross_entropy, gelu, normalize, scaled_dot_product_attention
 
 
 def masked_mean(t: Tensor, mask: Tensor) -> Tensor:
@@ -79,8 +78,9 @@ class SelfAttention(nn.Module):
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         # regularization
-        self.attn_dropout = nn.Dropout(config.attn_pdrop)
-        self.resid_dropout = nn.Dropout(config.resid_pdrop)
+        # not used in inference
+        # self.attn_dropout = nn.Dropout(config.attn_pdrop)
+        # self.resid_dropout = nn.Dropout(config.resid_pdrop)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
@@ -89,25 +89,26 @@ class SelfAttention(nn.Module):
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        q = rearrange(q, "b n (h d) -> b h n d", h=self.n_head)
-        # q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
         q, k, v = (apply_rope(mat, rope_freqs) for mat in (q, k, v))
 
-        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        # self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        # att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         if mask is not None:
             mask = rearrange(mask, "b j -> b () () j")
-            att = att.masked_fill(mask, -1e10)
-        att = softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        #     att = att.masked_fill(mask, -1e10)
+        # att = softmax(att, dim=-1)
+        # att = self.attn_dropout(att)
+        # y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0, is_causal=False)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
 
         # output projection
-        y = self.resid_dropout(self.c_proj(y))
+        # y = self.resid_dropout(self.c_proj(y)) # no dropout in inference
+        y = self.c_proj(y)
         return y
 
 
