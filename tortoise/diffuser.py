@@ -133,7 +133,7 @@ class DiffusionLayer(nn.Module):
     def __init__(self, channels: int, p_dropout: float, n_head: int):
         super().__init__()
         self.resblock = ResBlock(channels, p_dropout)
-        self.attention = AttentionBlock(channels, n_head)
+        self.attention = AttentionBlock(channels, n_head, use_rel_pos=True)
 
     def forward(self, inputs: Tensor, time_embeddings: Tensor) -> Tensor:
         return self.attention(self.resblock(inputs, time_embeddings))
@@ -208,10 +208,10 @@ class SpacedDiffuser(nn.Module):
         )
         self.latent_conditioner = nn.Sequential(
             nn.Conv1d(in_channels=config.latent_channels, out_channels=config.n_embd, kernel_size=3, padding=1),
-            AttentionBlock(config.n_embd, config.n_head),
-            AttentionBlock(config.n_embd, config.n_head),
-            AttentionBlock(config.n_embd, config.n_head),
-            AttentionBlock(config.n_embd, config.n_head),
+            AttentionBlock(config.n_embd, config.n_head, use_rel_pos=True),
+            AttentionBlock(config.n_embd, config.n_head, use_rel_pos=True),
+            AttentionBlock(config.n_embd, config.n_head, use_rel_pos=True),
+            AttentionBlock(config.n_embd, config.n_head, use_rel_pos=True),
         )
 
     def forward(

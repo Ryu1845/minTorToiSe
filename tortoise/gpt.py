@@ -44,7 +44,7 @@ class GPTConfig:
             config.n_embd,
             config.n_head,
             config.n_layer,
-            block_size=config.max_speech_tokens + config.max_conditioning_inputs + 2,
+            block_size=config.max_speech_tokens + config.max_text_tokens + config.max_conditioning_inputs + 4,
             vocab_size=config.max_speech_tokens,
         )
 
@@ -154,14 +154,9 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.block_size = config.block_size
 
-        self.transformer = nn.ModuleDict(
-            {
-                "drop": nn.Dropout(config.embd_pdrop),
-                "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-                "ln_f": nn.LayerNorm(config.n_embd),
-            }
-        )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.drop = nn.Dropout(config.embd_pdrop)
+        self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
 
         # init all weights, and apply a special scaled init to the residual projections, per GPT-2 paper
         self.apply(self._init_weights)
@@ -224,22 +219,16 @@ class GPT(nn.Module):
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
 
         # forward the GPT model itself
-        x = self.transformer.drop(tok_emb)
-        for block in self.transformer.h:
+        x = self.drop(tok_emb)
+        for block in self.h:
             x = block(x)
-        x = self.transformer.ln_f(x)
-        logits = self.lm_head(x)
+        x = self.ln_f(x)
 
-        # if we are given some desired targets also calculate the loss
-        loss = None
-        if targets is not None:
-            loss = cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
-
-        return x, logits, loss
+        return x
 
 
 if __name__ == "__main__":
     gpt_config = GPTConfig()
     gpt = GPT(gpt_config)
-    out, gpt_logits, gpt_loss = gpt(torch.randn((1, 23, gpt_config.n_embd)))
-    print(out.shape, gpt_logits.shape, gpt_loss)
+    out = gpt(torch.randn((1, 23, gpt_config.n_embd)))
+    print(out.shape)

@@ -19,9 +19,9 @@ class Inference:
         self.conditioning_encoder = ConditioningEncoder(config, spec_dim=80).eval()
         self.autoregressive = Tortoise(config).eval()
         self.tokenizer = Tokenizer()
-        self.clvp = CLVP(CLVPConfig())
-        self.diffuser = SpacedDiffuser(SpaceDiffuserConfig())
-        self.vocoder = UnivNetGenerator()
+        self.clvp = CLVP.from_pretrained()
+        self.diffuser = SpacedDiffuser.from_pretrained()
+        self.vocoder = UnivNetGenerator.from_pretrained()
         self.calm_token = 83  # token for coding silence # TODO: don't hardcode
 
     @torch.inference_mode()
@@ -40,7 +40,7 @@ class Inference:
         for i in range(samples_to_generate):
             print(f"Generating sample nr {i}")
             sample_speech_tokens: Int[Tensor, "1 length_speech_output"] = self.autoregressive.generate_speech_tokens(
-                text_inputs, speech_conditioning_latent=conditioning_latent, max_length=80  # for testing
+                text_inputs, speech_conditioning_latent=conditioning_latent  # , max_length=80  # for testing
             )
             samples.append(sample_speech_tokens)
 

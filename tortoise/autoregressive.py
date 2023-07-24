@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 
 import torch
 from einops import rearrange
+from huggingface_hub import hf_hub_download
+from safetensors.torch import load_file, save_file
 from jaxtyping import Float
 from torch import Tensor, nn
 from torch.nn.functional import cross_entropy, pad, softmax
@@ -48,9 +50,9 @@ class TortoiseConfig:
     n_text_token: int = 255
     start_text_token: int = 255
     stop_text_token: int = 0
-    n_speech_token: int = 8194
-    start_speech_token: int = 8192
-    stop_speech_token: int = 8193
+    n_speech_token: int = 8193
+    start_speech_token: int = 83
+    stop_speech_token: int = 83
     train_solo_embeddings: bool = False
     use_speech_tokens_as_input: bool = True
     checkpointing: bool = False
@@ -117,15 +119,16 @@ class AttentionBlock(nn.Module):
     https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/models/unet.py#L66.
     """
 
-    def __init__(self, n_embd: int, n_head: int):
+    def __init__(self, n_embd: int, n_head: int, *, use_rel_pos: bool):
         super().__init__()
         self.n_head = n_head
         self.norm = nn.GroupNorm(32, n_embd)
         self.qkv = nn.Conv1d(n_embd, n_embd * 3, 1)
         self.proj_out = nn.Conv1d(n_embd, n_embd, kernel_size=1)
-        self.relative_pos_embeddings = RelativePositionBias(
-            scale=(n_embd // n_head) ** 0.5, heads=n_head, num_buckets=32, max_distance=64
-        )
+        if use_rel_pos:
+            self.relative_pos_embeddings = RelativePositionBias(
+                scale=(n_embd // n_head) ** 0.5, heads=n_head, num_buckets=32, max_distance=64
+            )
 
     def forward(self, x: Float[Tensor, "n c l"], mask: Optional[Tensor] = None) -> Tensor:
         b, c, l = x.size()  # batch size, embedding dimensionality (n_embd), sequence length
@@ -138,9 +141,10 @@ class AttentionBlock(nn.Module):
 
         scale = 1 / math.sqrt(math.sqrt(c / self.n_head))
         att = torch.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
-        att = self.relative_pos_embeddings(att.reshape(b, self.n_head, att.shape[-2], att.shape[-1])).reshape(
-            b * self.n_head, att.shape[-2], att.shape[-1]
-        )
+        if hasattr(self, "relative_pos_embeddings"):
+            att = self.relative_pos_embeddings(att.reshape(b, self.n_head, att.shape[-2], att.shape[-1])).reshape(
+                b * self.n_head, att.shape[-2], att.shape[-1]
+            )
         if mask is not None:
             mask = rearrange(mask, "b j -> b () () j")
             att = att.masked_fill(mask, -1e10)
@@ -154,12 +158,36 @@ class ConditioningEncoder(nn.Module):
     def __init__(self, config: TortoiseConfig, spec_dim: int = 80):
         super().__init__()
         self.init = nn.Conv1d(spec_dim, config.n_embd, kernel_size=1)
-        self.attn = nn.Sequential(*(AttentionBlock(config.n_embd, config.n_head) for _ in range(6)))
+        self.attn = nn.Sequential(*(AttentionBlock(config.n_embd, config.n_head, use_rel_pos=False) for _ in range(6)))
 
     def forward(self, speech: Float[Tensor, "batch spec_d length"]) -> Tensor:
         out = self.init(speech)  # [n spec_d l] -> [n c l]
         out = self.attn(out)
         return out[:, :, 0]  # [n c l] -> [n c] (the first element)
+
+    @classmethod
+    def convert_old(cls):
+        model = cls(TortoiseConfig())
+        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="autoregressive.safetensors")
+        old_state_dict = load_file(model_path, device="cuda")
+        new_state_dict = {}
+        for k, v in old_state_dict.items():
+            if "conditioning_encoder" not in k:
+                continue
+            k = k.replace("conditioning_encoder.", "")  # noqa: PLW2901
+            if ("attn.c" in k or "mlp.c" in k) and "weight" in k:  # transpose conv1d weight into linear
+                v = v.permute(1, 0).contiguous()  # noqa: PLW2901
+            new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
+        save_file(new_state_dict, "conditioning_encoder.safetensors")
+        return model
+
+    @classmethod
+    def from_pretrained(cls):
+        model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="conditioning_encoder.safetensors")
+        model = cls(TortoiseConfig())
+        model.load_state_dict(load_file(model_path, device="cuda"))
+        return model
 
 
 class Tortoise(nn.Module):
@@ -205,7 +233,7 @@ class Tortoise(nn.Module):
         # TODO investigate raw mels
         speech_emb = self.embed_speech(speech_inputs) + self.embed_pos_speech(speech_inputs)
         emb = torch.cat([condition, text_emb, speech_emb], dim=1)
-        enc = self.final_norm(self.transformer(emb)[0])
+        enc = self.final_norm(self.transformer(emb))
         text_logits = self.text_head(enc[:, : text_emb.shape[1]]).permute(0, 2, 1)
         speech_logits = self.speech_head(enc[:, -speech_emb.shape[1] :]).permute(0, 2, 1)
         latent = enc[:, -speech_emb.shape[1] : -2]  # -2 -> remove tokens added in this forward pass
@@ -243,6 +271,7 @@ class Tortoise(nn.Module):
             # forward pass to get next token
             # print(speech_inputs)
             print(f"Generated {speech_inputs.shape[1]} tokens", end="\r")
+            # TODO: remove workaround
             speech_inputs_idx = torch.where(
                 speech_inputs >= self.start_speech_token,  # special tokens
                 speech_inputs - self.start_speech_token,
@@ -251,7 +280,8 @@ class Tortoise(nn.Module):
             speech_emb = self.embed_speech(speech_inputs_idx) + self.embed_pos_speech(speech_inputs)
             # print(speech_emb.shape)
             gpt_emb = torch.cat([emb, speech_emb], dim=1)
-            _hidden_state, logits, _loss = self.transformer(gpt_emb)
+            hidden_state = self.transformer(gpt_emb)
+            logits = self.speech_head(hidden_state)
             scores = logits[:, -1, :]
 
             # top p
@@ -298,18 +328,62 @@ class Tortoise(nn.Module):
         print()
         return speech_inputs
 
+    @classmethod
+    def convert_old(cls):
+        model = cls(TortoiseConfig())
+        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="autoregressive.safetensors")
+        old_state_dict = load_file(model_path, device="cuda")
+        deleted_parts = (
+            "conditioning_encoder",  # conditioning_encoder is not really deleted but it's handled separately
+            "attn.masked_bias",
+        )
+        name_changes = {
+            "gpt": "transformer",
+            "mel_head": "speech_head",
+            "mel_pos_embedding": "embed_pos_speech",
+            "text_pos_embedding": "embed_pos_text",
+            "mel_embedding": "embed_speech",
+            "text_embedding": "embed_text",
+        }
+        new_state_dict = {}
+        for k, v in old_state_dict.items():
+            if any(pattern in k for pattern in deleted_parts):
+                continue
+            for pattern, replacement in name_changes.items():
+                if pattern in k:
+                    k = k.replace(pattern, replacement)  # noqa: PLW2901
+            if ("attn.c" in k or "mlp.c" in k) and "weight" in k:  # transpose conv1d weight into linear
+                v = v.permute(1, 0).contiguous()  # noqa: PLW2901
+            new_state_dict[k] = v
+        model.load_state_dict(new_state_dict)
+        save_file(new_state_dict, "autoregressive.safetensors")
+        return model
+
+    @classmethod
+    def from_pretrained(cls):
+        model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="autoregressive.safetensors")
+        model = cls(TortoiseConfig())
+        model.load_state_dict(load_file(model_path, device="cuda"))
+        return model
+
 
 if __name__ == "__main__":
+    torch.manual_seed(1)
     torch.set_default_device("cuda")
-    t_config = TortoiseConfig()
-    conditioning_encoder = ConditioningEncoder(t_config, spec_dim=80)
-    conditioning_latent = conditioning_encoder(speech=torch.randn(1, 80, 395))
-    print(conditioning_latent.shape)
+    # Tortoise.convert_old()
+    # ConditioningEncoder.convert_old()
+    # exit()
+    with torch.inference_mode():
+        t_config = TortoiseConfig()
+        conditioning_encoder = ConditioningEncoder.from_pretrained().eval()
+        conditioning_latent = conditioning_encoder(speech=torch.randn(1, 80, 395))
+        print(conditioning_latent.shape)
 
-    tortoise = Tortoise(t_config).eval()
-    l_text, l_speech, speech_log, latent = tortoise(
-        text_inputs=torch.randint(high=120, size=(1, 250)),
-        speech_inputs=torch.randint(high=8192, size=(1, 250)),
-        speech_conditioning_latent=conditioning_latent,
-    )
-    print(l_text)
+        # tortoise = Tortoise(t_config).eval()
+        tortoise = Tortoise.from_pretrained().eval()
+        l_text, l_speech, speech_log, latent = tortoise(
+            text_inputs=torch.randint(high=120, size=(1, 250)),
+            speech_inputs=torch.randint(high=8192, size=(1, 250)),
+            speech_conditioning_latent=conditioning_latent,
+        )
+        print(l_text)
