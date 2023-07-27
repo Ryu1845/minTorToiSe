@@ -16,6 +16,8 @@ from torch.nn.functional import cross_entropy, pad, softmax
 from tortoise.gpt import GPT, GPTConfig
 
 
+
+
 @dataclass
 class TortoiseConfig:
     """
@@ -47,16 +49,15 @@ class TortoiseConfig:
     max_speech_tokens: int = 604
     max_conditioning_inputs: int = 2
     mel_length_compression: int = 1024
-    n_text_token: int = 255
+    n_text_token: int = 256
     start_text_token: int = 255
     stop_text_token: int = 0
-    n_speech_token: int = 8193
-    start_speech_token: int = 83
-    stop_speech_token: int = 83
+    n_speech_token: int = 8194
+    start_speech_token: int = 8192
+    stop_speech_token: int = 8193
     train_solo_embeddings: bool = False
     use_speech_tokens_as_input: bool = True
     checkpointing: bool = False
-    n_type: int = 1
 
 
 class LearnedPositionEmbedding(nn.Module):
@@ -163,6 +164,7 @@ class ConditioningEncoder(nn.Module):
     def forward(self, speech: Float[Tensor, "batch spec_d length"]) -> Tensor:
         out = self.init(speech)  # [n spec_d l] -> [n c l]
         out = self.attn(out)
+        return torch.ones(1,1024)
         return out[:, :, 0]  # [n c l] -> [n c] (the first element)
 
     @classmethod
@@ -198,8 +200,8 @@ class Tortoise(nn.Module):
         self.start_speech_token = config.start_speech_token
         self.stop_speech_token = config.stop_speech_token
 
-        self.embed_text = nn.Embedding(config.n_text_token * config.n_type + 1, config.n_embd)
-        self.embed_speech = nn.Embedding(config.n_speech_token * config.n_type + 1, config.n_embd)
+        self.embed_text = nn.Embedding(config.n_text_token, config.n_embd)
+        self.embed_speech = nn.Embedding(config.n_speech_token, config.n_embd)
         self.embed_pos_text = LearnedPositionEmbedding(config.max_text_tokens + 2, config.n_embd)
         self.embed_pos_speech = LearnedPositionEmbedding(
             config.max_speech_tokens + config.max_conditioning_inputs + 2, config.n_embd
@@ -209,8 +211,8 @@ class Tortoise(nn.Module):
 
         self.final_norm = nn.LayerNorm(config.n_embd)
 
-        self.text_head = nn.Linear(config.n_embd, config.n_text_token * config.n_type + 1)
-        self.speech_head = nn.Linear(config.n_embd, config.n_speech_token * config.n_type + 1)
+        self.text_head = nn.Linear(config.n_embd, config.n_text_token)
+        self.speech_head = nn.Linear(config.n_embd, config.n_speech_token)
 
         self.embed_text.weight.data.normal_(mean=0.0, std=0.02)
 
@@ -251,11 +253,9 @@ class Tortoise(nn.Module):
         repetition_penalty: float = 2.0,
         temperature: float = 0.2,
         top_p: float = 0.8,
-        eos_token_id: Optional[int] = None,
-        pad_token_id: int = 0,
         max_length: int = 250,
     ) -> Tensor:
-        eos_token_id_tensor = torch.tensor([eos_token_id]).to(input_ids.device) if eos_token_id is not None else None
+        eos_token_id_tensor = torch.tensor([self.stop_speech_token]).to(input_ids.device)
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
         condition = speech_conditioning_latent.unsqueeze(1)
@@ -271,18 +271,13 @@ class Tortoise(nn.Module):
             # forward pass to get next token
             # print(speech_inputs)
             print(f"Generated {speech_inputs.shape[1]} tokens", end="\r")
-            # TODO: remove workaround
-            speech_inputs_idx = torch.where(
-                speech_inputs >= self.start_speech_token,  # special tokens
-                speech_inputs - self.start_speech_token,
-                speech_inputs,
-            )
-            speech_emb = self.embed_speech(speech_inputs_idx) + self.embed_pos_speech(speech_inputs)
+            speech_emb = self.embed_speech(speech_inputs) + self.embed_pos_speech(speech_inputs)
             # print(speech_emb.shape)
             gpt_emb = torch.cat([emb, speech_emb], dim=1)
             hidden_state = self.transformer(gpt_emb)
-            logits = self.speech_head(hidden_state)
+            logits = self.speech_head(self.final_norm(hidden_state))
             scores = logits[:, -1, :]
+            # print(scores)
 
             # top p
             sorted_logits, sorted_indices = torch.sort(scores, descending=False)
@@ -297,21 +292,17 @@ class Tortoise(nn.Module):
             scores = scores / temperature
 
             # repetition penalty
-            score = torch.gather(scores, 1, speech_inputs_idx)
+            score = torch.gather(scores, 1, speech_inputs)
             # if score < 0 then repetition penalty has to be multiplied to reduce the previous token probability
             score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
-            scores.scatter_(1, speech_inputs_idx, score)
+            scores.scatter_(1, speech_inputs, score)
 
             # sample
             probs = nn.functional.softmax(scores, dim=-1)
             next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # finished sentences should have their next token be a padding token
-            if eos_token_id is not None:
-                if pad_token_id is None:
-                    msg = "If `eos_token_id` is defined, make sure that `pad_token_id` is defined."
-                    raise ValueError(msg)
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+            next_tokens = next_tokens * unfinished_sequences + self.stop_speech_token * (1 - unfinished_sequences)
             # update generated ids, model inputs, and length for next step
             speech_inputs = torch.cat([speech_inputs, next_tokens[:, None]], dim=-1)
 
@@ -326,7 +317,13 @@ class Tortoise(nn.Module):
             if speech_inputs.shape[-1] >= max_length:
                 break
         print()
-        return speech_inputs
+        return self.fix_outputs(speech_inputs)
+
+    def fix_outputs(self, speech_tokens: Tensor):
+        speech_tokens = torch.where(speech_tokens==self.stop_speech_token, 83, speech_tokens)
+        # speech_tokens[stop_token_indices.min().item():] = 83
+        return speech_tokens[:,1:]
+
 
     @classmethod
     def convert_old(cls):

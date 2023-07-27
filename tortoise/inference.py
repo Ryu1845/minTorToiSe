@@ -15,13 +15,13 @@ class Inference:
     """Inference class for tortoise"""
 
     def __init__(self):
-        config = TortoiseConfig()
-        self.conditioning_encoder = ConditioningEncoder(config, spec_dim=80).eval()
-        self.autoregressive = Tortoise(config).eval()
+        print("Loading models...")
+        self.conditioning_encoder = ConditioningEncoder.from_pretrained().eval()
+        self.autoregressive = Tortoise.from_pretrained().eval()
         self.tokenizer = Tokenizer()
-        self.clvp = CLVP.from_pretrained()
-        self.diffuser = SpacedDiffuser.from_pretrained()
-        self.vocoder = UnivNetGenerator.from_pretrained()
+        self.clvp = CLVP.from_pretrained().eval()
+        self.diffuser = SpacedDiffuser.from_pretrained().eval()
+        self.vocoder = UnivNetGenerator.from_pretrained().eval()
         self.calm_token = 83  # token for coding silence # TODO: don't hardcode
 
     @torch.inference_mode()
@@ -38,7 +38,7 @@ class Inference:
         print(f"Generating {samples_to_generate} samples...")
         samples = []
         for i in range(samples_to_generate):
-            print(f"Generating sample nr {i}")
+            print(f"Generating sample nr {i} of {samples_to_generate}")
             sample_speech_tokens: Int[Tensor, "1 length_speech_output"] = self.autoregressive.generate_speech_tokens(
                 text_inputs, speech_conditioning_latent=conditioning_latent  # , max_length=80  # for testing
             )

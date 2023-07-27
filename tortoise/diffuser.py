@@ -250,6 +250,7 @@ class SpacedDiffuser(nn.Module):
     def sample(self, noise: Tensor, embeddings: Tensor) -> Tensor:
         # TODO: find another variable name for noise
         for i in reversed(range(self.n_timestep)):
+            print(f"Timestep {i:03d} of {self.n_timestep}", end='\r')
             timesteps = tensor([i])  # assumes batch size is one
             # p mean variance
             _batch_size, n_channel = noise.shape[:2]
@@ -284,6 +285,7 @@ class SpacedDiffuser(nn.Module):
             # TODO: check cond_fn
             sample = mean + non_zero_mask * torch.exp(0.5 * log_variance) * new_noise
             noise = sample
+        print()
         return noise
 
     @classmethod
