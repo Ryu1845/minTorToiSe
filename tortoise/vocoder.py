@@ -351,6 +351,7 @@ class UnivNetGenerator(nn.Module):
 
         if z is None:
             z = torch.randn(c.shape[0], self.noise_dim, mel.size(2)).to(mel.device)
+            #z = torch.load("vocoder_z.pth")
 
         audio = self.forward(mel, z)
         audio = audio[:, :, : -(self.hop_length * 10)]
