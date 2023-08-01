@@ -254,15 +254,15 @@ class SpacedDiffuser(nn.Module):
         # TODO: find another variable name for noise
         for i in reversed(range(self.n_timestep)):
             print(f"Timestep {200-i+1} of {self.n_timestep}", end="\r")
-            #print(noise[0,0,:5])
+            # print(noise[0,0,:5])
             timesteps = tensor([i])  # assumes batch size is one
-            #print(timesteps)
+            # print(timesteps)
             # p mean variance
             _batch_size, n_channel = noise.shape[:2]
             output = self.forward(noise, timesteps, precomputed_embeddings=embeddings, conditioning_free=False)
-            #print(output[0,0,:5])
+            # print(output[0,0,:5])
             output_no_cond = self.forward(noise, timesteps, conditioning_free=True)
-            #print(output_no_cond[0,0,:5])
+            # print(output_no_cond[0,0,:5])
             output, variable_values = torch.split(output, n_channel, dim=1)
             output_no_cond, _ = torch.split(output_no_cond, n_channel, dim=1)
             min_log = into_tensor(self.posterior_log_variance_clipped, timesteps, noise.shape)
@@ -273,28 +273,31 @@ class SpacedDiffuser(nn.Module):
                 1 - timesteps[0].item() / self.n_timestep
             )  # ramp conditioning free
             output = (1 + conditioning_free_k) * output - conditioning_free_k * output_no_cond
-            #print(output[0,0,:5])
+            # print(output[0,0,:5])
             epsilon = output
             predicted_xstart = (
                 into_tensor(self.sqrt_recip_alphas_cumprod, timesteps, noise.shape) * noise
                 - into_tensor(self.sqrt_recipm1_alphas_cumprod, timesteps, noise.shape) * epsilon
             )  # predict from eps
-            #print(predicted_xstart[0,0,:5])
+            # print(predicted_xstart[0,0,:5])
 
             # q post mean variance
-            posterior_mean = into_tensor(
-                self.posterior_mean_coef1, timesteps, noise.shape
-            ) * predicted_xstart.clamp(-1,1) + into_tensor(self.posterior_mean_coef2, timesteps, noise.shape) * noise
-            #print(posterior_mean[0,0,:5])
+            posterior_mean = (
+                into_tensor(self.posterior_mean_coef1, timesteps, noise.shape) * predicted_xstart.clamp(-1, 1)
+                + into_tensor(self.posterior_mean_coef2, timesteps, noise.shape) * noise
+            )
+            # print(posterior_mean[0,0,:5])
             _posterior_variance = into_tensor(self.posterior_variance, timesteps, noise.shape)
             _posterior_log_variance_clipped = into_tensor(self.posterior_log_variance_clipped, timesteps, noise.shape)
             mean = posterior_mean
             assert mean.shape == log_variance.shape == predicted_xstart.shape == noise.shape
 
-            #new_noise = torch.rand_like(noise)
+            # new_noise = torch.rand_like(noise)
             new_noise = torch.randn(*noise.shape)
-            #new_noise = torch.load("new_noise.pth")
-            non_zero_mask = (timesteps != 0).float().view(-1, 1)  # no noise when t == 0 # TODO: nb of ones should be batch size
+            # new_noise = torch.load("new_noise.pth")
+            non_zero_mask = (
+                (timesteps != 0).float().view(-1, 1)
+            )  # no noise when t == 0 # TODO: nb of ones should be batch size
             # TODO: check cond_fn
             sample = mean + non_zero_mask * torch.exp(0.5 * log_variance) * new_noise
             noise = sample

@@ -137,11 +137,13 @@ class AttentionBlock(nn.Module):
         b, c, l = x.size()  # batch size, embedding dimensionality (n_embd), sequence length
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k, v = self.qkv(self.norm(x)).reshape(b * self.n_head, c * 3 // self.n_head, l).split(c//self.n_head, dim=1) 
-        #q, k, v = self.qkv(x).split(c, dim=1)
-        #q = q.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
-        #k = k.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
-        #v = v.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+        q, k, v = (
+            self.qkv(self.norm(x)).reshape(b * self.n_head, c * 3 // self.n_head, l).split(c // self.n_head, dim=1)
+        )
+        # q, k, v = self.qkv(x).split(c, dim=1)
+        # q = q.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+        # k = k.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
+        # v = v.view(b * self.n_head, c // self.n_head, l)  # (B*nh, hs, T)
 
         scale = 1 / math.sqrt(math.sqrt(c / self.n_head))
         att = torch.einsum("bct,bcs->bts", q * scale, k * scale)  # More stable with f16 than dividing afterwards
@@ -167,25 +169,36 @@ class ConditioningEncoder(nn.Module):
     def forward(self, speech: Float[Tensor, "batch spec_d length"]) -> Tensor:
         out = self.init(speech)  # [n spec_d l] -> [n c l]
         out = self.attn(out)
-        #return torch.load("test_cond_enc.pth")
+        # return torch.load("test_cond_enc.pth")
         return out[:, :, 0]  # [n c l] -> [n c] (the first element)
 
     @torch.inference_mode()
     def get_conditioning(self, speech_wav: str):
         cond_len = 132300
         wav, sr = torchaudio.load(speech_wav)
-        if sr!=22050:
+        if sr != 22050:
             wav = resample(wav, orig_freq=sr, new_freq=22_050)
         gap = wav.shape[-1] - cond_len
-        if gap<0:
+        if gap < 0:
             wav = pad(wav, pad=(0, abs(gap)))
-        elif gap>0:
+        elif gap > 0:
             wav = wav[:, :cond_len]
 
-        mel_norm_file=str((Path(__file__).parent.parent/"mel_norms.pth").resolve())
+        mel_norm_file = str((Path(__file__).parent.parent / "mel_norms.pth").resolve())
         mel_norms = torch.load(mel_norm_file).cuda()
-        get_mel = MelSpectrogram(n_fft=1024, hop_length=256, win_length=1024, power=2, n_mels=80, f_min=0, f_max=8000, sample_rate=22_050, normalized=False, norm="slaney")
-        mel=get_mel(wav.cuda().unsqueeze(0))
+        get_mel = MelSpectrogram(
+            n_fft=1024,
+            hop_length=256,
+            win_length=1024,
+            power=2,
+            n_mels=80,
+            f_min=0,
+            f_max=8000,
+            sample_rate=22_050,
+            normalized=False,
+            norm="slaney",
+        )
+        mel = get_mel(wav.cuda().unsqueeze(0))
 
         # Dynamic range compression
         mel = mel.clamp(min=1e-5).log()
