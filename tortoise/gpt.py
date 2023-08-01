@@ -169,7 +169,7 @@ class GPT(nn.Module):
         # print(f"number of parameters: {n_params / 1e6:.2f}M")
 
     def forward(
-        self, tok_emb: Float[Tensor, "b t d"], targets: Optional[Float[Tensor, "b t d"]] = None
+        self, tok_emb: Float[Tensor, "b t d"]
     ) -> Tuple[Float[Tensor, "b t d"], Float[Tensor, "b t vocab_size"], Optional[Float[Tensor, "1"]]]:
         b, t, d = tok_emb.size()
         assert t <= self.block_size, f"Cannot forward sequence of length {t}, block size is only {self.block_size}"
