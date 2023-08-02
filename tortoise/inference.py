@@ -34,7 +34,7 @@ class DiffuserConfig:
 @dataclass
 class InferenceConfig:
     text: str
-    conditioning_speech: Path
+    conditioning_speech: List[Path]
     output_path: Path = field(default_factory=lambda: Path("out.wav"))
     samples_to_generate: int = 1
     seed: int = 1
@@ -59,7 +59,7 @@ class Inference:
     def __call__(
         self,
         text: str,
-        conditioning_speech: Path,
+        conditioning_speech: List[Path],
         output_path: Path,
         samples_to_generate: int = 1,
         seed: int = 1,
@@ -80,7 +80,7 @@ class Inference:
 
         torch.manual_seed(seed)
 
-        conditioning_latent = self.conditioning_encoder.get_conditioning(speech_wav=str(conditioning_speech))
+        conditioning_latent = self.conditioning_encoder.get_conditioning(speech_samples=conditioning_speech)
         # print("auto cond latent:", conditioning_latent)
         # print("diffusion cond latent:", torch.load("cond_latent.pth"))
 

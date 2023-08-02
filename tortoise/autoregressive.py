@@ -4,18 +4,18 @@ The TorToiSe autoregressive model
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torchaudio
 from einops import rearrange
 from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file, save_file
 from jaxtyping import Float
+from safetensors.torch import load_file, save_file
 from torch import Tensor, nn
-from torch.nn.functional import cross_entropy, pad, softmax
-from torchaudio.transforms import MelSpectrogram
+from torch.nn.functional import pad, softmax
 from torchaudio.functional import resample
+from torchaudio.transforms import MelSpectrogram
 
 from tortoise.gpt import GPT, GPTConfig
 
@@ -173,38 +173,41 @@ class ConditioningEncoder(nn.Module):
         return out[:, :, 0]  # [n c l] -> [n c] (the first element)
 
     @torch.inference_mode()
-    def get_conditioning(self, speech_wav: str):
+    def get_conditioning(self, speech_samples: List[Path]):
         cond_len = 132300
-        wav, sr = torchaudio.load(speech_wav)
-        if sr != 22050:
-            wav = resample(wav, orig_freq=sr, new_freq=22_050)
-        gap = wav.shape[-1] - cond_len
-        if gap < 0:
-            wav = pad(wav, pad=(0, abs(gap)))
-        elif gap > 0:
-            wav = wav[:, :cond_len]
+        speech_conditionings = []
+        for speech_wav in speech_samples:
+            wav, sr = torchaudio.load(str(speech_wav.resolve()))
+            if sr != 22050:
+                wav = resample(wav, orig_freq=sr, new_freq=22_050)
+            gap = wav.shape[-1] - cond_len
+            if gap < 0:
+                wav = pad(wav, pad=(0, abs(gap)))
+            elif gap > 0:
+                wav = wav[:, :cond_len]
 
-        mel_norm_file = str((Path(__file__).parent.parent / "mel_norms.pth").resolve())
-        mel_norms = torch.load(mel_norm_file).cuda()
-        get_mel = MelSpectrogram(
-            n_fft=1024,
-            hop_length=256,
-            win_length=1024,
-            power=2,
-            n_mels=80,
-            f_min=0,
-            f_max=8000,
-            sample_rate=22_050,
-            normalized=False,
-            norm="slaney",
-        )
-        mel = get_mel(wav.cuda().unsqueeze(0))
+            mel_norm_file = str((Path(__file__).parent.parent / "mel_norms.pth").resolve())
+            mel_norms = torch.load(mel_norm_file).cuda()
+            get_mel = MelSpectrogram(
+                n_fft=1024,
+                hop_length=256,
+                win_length=1024,
+                power=2,
+                n_mels=80,
+                f_min=0,
+                f_max=8000,
+                sample_rate=22_050,
+                normalized=False,
+                norm="slaney",
+            )
+            mel = get_mel(wav.cuda().unsqueeze(0))
 
-        # Dynamic range compression
-        mel = mel.clamp(min=1e-5).log()
-        mel = mel / mel_norms.unsqueeze(0).unsqueeze(-1)
+            # Dynamic range compression
+            mel = mel.clamp(min=1e-5).log()
+            mel = mel / mel_norms.unsqueeze(0).unsqueeze(-1)
+            speech_conditionings.append(self.forward(mel.squeeze(0)))
 
-        return self.forward(mel.squeeze(0))
+        return torch.stack(speech_conditionings, dim=1).mean(dim=1)
 
     @classmethod
     def convert_old(cls):
