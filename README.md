@@ -8,5 +8,5 @@ git clone https://github.com/Ryu1845/minTorToiSe/
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-python tortoise/inference.py
+python tortoise/inference.py --text "Tortoise is a text-to-speech program that is capable of synthesizing speech in multiple voices with realistic prosody and intonation." --conditioning_speech "emma.wav" --n_timestep 80
 ```

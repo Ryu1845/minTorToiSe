@@ -32,6 +32,7 @@ dependencies = [
     "inflect",
     "huggingface_hub",
     "safetensors",
+    "simple-parsing",
 ]
 
 [project.urls]

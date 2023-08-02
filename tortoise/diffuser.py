@@ -137,7 +137,7 @@ class DiffusionLayer(nn.Module):
 
 
 @dataclass
-class SpaceDiffuserConfig:
+class DiffusionConfig:
     n_embd: int = 1024
     n_layer: int = 10
     n_head: int = 16
@@ -146,43 +146,12 @@ class SpaceDiffuserConfig:
     out_channels: int = 200
     latent_channels: int = 1024
     conditioning_free_k: int = 2
-    betas: np.ndarray = field(default_factory=lambda: LINEAR_BETA_SCHEDULE)
-    timesteps: Set[int] = field(default_factory=lambda: space_timesteps(4000, [200]))
 
 
-class SpacedDiffuser(nn.Module):
-    def __init__(self, config: SpaceDiffuserConfig):
+class DiffusionModel(nn.Module):
+    def __init__(self, config: DiffusionConfig):
         super().__init__()
         self.n_embd = config.n_embd
-        self.conditioning_free_k = config.conditioning_free_k
-
-        betas: np.ndarray = np.array(config.betas, dtype=np.float64)  # for more precision
-        alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
-
-        betas = []
-        timestep_map = []
-        last_alpha_cumprod = 1.0
-        for idx, alpha_cumprod in enumerate(alphas_cumprod):
-            if idx in config.timesteps:
-                betas.append(1 - alpha_cumprod / last_alpha_cumprod)
-                last_alpha_cumprod = alpha_cumprod
-                timestep_map.append(idx)
-        self.n_timestep = len(betas)
-        self.timestep_map = torch.tensor(timestep_map)
-
-        betas: np.ndarray = np.array(betas, dtype=np.float64)
-        self.betas = betas
-        alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
-
-        self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod)
-        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod - 1.0)
-
-        alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
-        self.posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        self.posterior_log_variance_clipped = np.log(np.append(self.posterior_variance[1], self.posterior_variance[1:]))
-        self.posterior_mean_coef1 = betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)
-        self.posterior_mean_coef2 = (1.0 - alphas_cumprod_prev) * np.sqrt(1.0 - betas) / (1.0 - alphas_cumprod)
-
         self.unconditioned_embedding = nn.Parameter(torch.randn(1, config.n_embd, 1))
         self.unconditioned_latent = nn.Parameter(torch.randn(1, 2 * config.n_embd))
         self.conditioning_timestep_integrator = TimestepEmbedSequential(
@@ -229,7 +198,7 @@ class SpacedDiffuser(nn.Module):
         else:
             assert precomputed_embeddings is not None, "precomputed_embeddings should be set when not conditioning free"
             code_embedding = precomputed_embeddings
-        time_embedding = self.embed_time(sin_timestep_embedding(self.timestep_map[timesteps], self.n_embd))
+        time_embedding = self.embed_time(sin_timestep_embedding(timesteps, self.n_embd))
         code_embedding = self.conditioning_timestep_integrator(code_embedding, time_embedding)
         inputs = self.input_block(inputs)
         inputs = torch.cat([inputs, code_embedding], dim=1)
@@ -248,20 +217,95 @@ class SpacedDiffuser(nn.Module):
         expanded_embedding = interpolate(embedding, size=seq_len, mode="nearest")
         return expanded_embedding
 
+    @classmethod
+    def convert_old(cls) -> "DiffusionModel":
+        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="diffusion_decoder.safetensors")
+        old_state_dict = load_file(model_path, device="cuda")
+        name_changes = {
+            "attn": "attention",
+            "resblk": "resblock",
+            "time_embed": "embed_time",
+            "inp_block": "input_block",
+            "code_norm": "norm",
+            "emb_layers": "embedding_layers",
+            "conditioning_timestep_integrator": "conditioning_timestep_integrator.layers",
+        }
+        deleted_parts = ("code_converter", "mel_head", "contextual_embedder", "code_embedding")
+        new_state_dict = {}
+        for k, v in old_state_dict.items():
+            if any(pattern in k for pattern in deleted_parts):
+                continue
+            for pattern, replacement in name_changes.items():
+                if pattern in k:
+                    k = k.replace(pattern, replacement)  # noqa: PLW2901
+            new_state_dict[k] = v
+        # setting a diffusion conditioning latent from the original repo
+        # afaict it's always the same
+        new_state_dict["unconditioned_latent"] = load_file(
+            hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="diffuser_cond_latent.safetensors"), device="cuda"
+        )["conditioning_latent"]
+        model = cls(DiffusionConfig())
+        save_file(new_state_dict, "diffuser.safetensors")
+        model.load_state_dict(new_state_dict)
+        return model
+
+    @classmethod
+    def from_pretrained(cls) -> "DiffusionModel":
+        model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="diffuser.safetensors")
+        model = cls(DiffusionConfig())
+        model.load_state_dict(load_file(model_path, device="cuda"))
+        return model
+
+
+class SpacedDiffuser:
+    def __init__(self, model: DiffusionModel, n_timestep: int = 200, conditioning_free_k: int = 2):
+        self.model = model
+        self.conditioning_free_k = conditioning_free_k
+        timesteps = space_timesteps(4000, [n_timestep])
+
+        betas: np.ndarray = np.array(LINEAR_BETA_SCHEDULE, dtype=np.float64)  # for more precision
+        alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
+
+        betas = []
+        timestep_map = []
+        last_alpha_cumprod = 1.0
+        for idx, alpha_cumprod in enumerate(alphas_cumprod):
+            if idx in timesteps:
+                betas.append(1 - alpha_cumprod / last_alpha_cumprod)
+                last_alpha_cumprod = alpha_cumprod
+                timestep_map.append(idx)
+        self.n_timestep = len(betas)
+        self.timestep_map = torch.tensor(timestep_map)
+
+        betas: np.ndarray = np.array(betas, dtype=np.float64)
+        self.betas = betas
+        alphas_cumprod = np.cumprod(1.0 - betas, axis=0)
+
+        self.sqrt_recip_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod)
+        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / alphas_cumprod - 1.0)
+
+        alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
+        self.posterior_variance = betas * (1.0 - alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+        self.posterior_log_variance_clipped = np.log(np.append(self.posterior_variance[1], self.posterior_variance[1:]))
+        self.posterior_mean_coef1 = betas * np.sqrt(alphas_cumprod_prev) / (1.0 - alphas_cumprod)
+        self.posterior_mean_coef2 = (1.0 - alphas_cumprod_prev) * np.sqrt(1.0 - betas) / (1.0 - alphas_cumprod)
+
     # TODO: add comments describing p mean variance etc
     @inference_mode()
     def sample(self, noise: Tensor, embeddings: Tensor) -> Tensor:
         # TODO: find another variable name for noise
         for i in reversed(range(self.n_timestep)):
-            print(f"Timestep {200-i+1} of {self.n_timestep}", end="\r")
+            print(f"Timestep {self.n_timestep-i} of {self.n_timestep}", end="\r")
             # print(noise[0,0,:5])
             timesteps = tensor([i])  # assumes batch size is one
             # print(timesteps)
             # p mean variance
             _batch_size, n_channel = noise.shape[:2]
-            output = self.forward(noise, timesteps, precomputed_embeddings=embeddings, conditioning_free=False)
+            output = self.model.forward(
+                noise, self.timestep_map[timesteps], precomputed_embeddings=embeddings, conditioning_free=False
+            )
             # print(output[0,0,:5])
-            output_no_cond = self.forward(noise, timesteps, conditioning_free=True)
+            output_no_cond = self.model.forward(noise, self.timestep_map[timesteps], conditioning_free=True)
             # print(output_no_cond[0,0,:5])
             output, variable_values = torch.split(output, n_channel, dim=1)
             output_no_cond, _ = torch.split(output_no_cond, n_channel, dim=1)
@@ -304,45 +348,6 @@ class SpacedDiffuser(nn.Module):
         print()
         return noise
 
-    @classmethod
-    def convert_old(cls) -> "SpacedDiffuser":
-        model_path = hf_hub_download(repo_id="Gatozu35/tortoise-tts", filename="diffusion_decoder.safetensors")
-        old_state_dict = load_file(model_path, device="cuda")
-        name_changes = {
-            "attn": "attention",
-            "resblk": "resblock",
-            "time_embed": "embed_time",
-            "inp_block": "input_block",
-            "code_norm": "norm",
-            "emb_layers": "embedding_layers",
-            "conditioning_timestep_integrator": "conditioning_timestep_integrator.layers",
-        }
-        deleted_parts = ("code_converter", "mel_head", "contextual_embedder", "code_embedding")
-        new_state_dict = {}
-        for k, v in old_state_dict.items():
-            if any(pattern in k for pattern in deleted_parts):
-                continue
-            for pattern, replacement in name_changes.items():
-                if pattern in k:
-                    k = k.replace(pattern, replacement)  # noqa: PLW2901
-            new_state_dict[k] = v
-        # setting a diffusion conditioning latent from the original repo
-        # afaict it's always the same
-        new_state_dict["unconditioned_latent"] = load_file(
-            hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="diffuser_cond_latent.safetensors"), device="cuda"
-        )["conditioning_latent"]
-        model = cls(SpaceDiffuserConfig())
-        save_file(new_state_dict, "diffuser.safetensors")
-        model.load_state_dict(new_state_dict)
-        return model
-
-    @classmethod
-    def from_pretrained(cls):
-        model_path = hf_hub_download(repo_id="Gatozu35/minTorToiSe", filename="diffuser.safetensors")
-        model = cls(SpaceDiffuserConfig())
-        model.load_state_dict(load_file(model_path, device="cuda"))
-        return model
-
 
 if __name__ == "__main__":
     torch.manual_seed(1)
@@ -350,8 +355,8 @@ if __name__ == "__main__":
     # SpacedDiffuser.convert_old()
     # exit()
     with torch.inference_mode():
-        diffuser = SpacedDiffuser.from_pretrained()
-        timestep_independent = diffuser.independent_timestep(torch.randn(1, 100, 1024), 348)
+        diffuser = SpacedDiffuser(DiffusionModel.from_pretrained().eval(), n_timestep=80)
+        timestep_independent = diffuser.model.independent_timestep(torch.randn(1, 100, 1024), 348)
         test_input = torch.randn(1, 100, 348)
         mel = diffuser.sample(test_input, timestep_independent)
         print(mel.shape)
